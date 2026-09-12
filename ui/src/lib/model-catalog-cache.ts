@@ -13,6 +13,7 @@ export type ModelCatalogRequest = {
   refresh: boolean;
   controller?: AbortController;
   promise: Promise<ModelCatalogResult>;
+  resolve: (result: ModelCatalogResult) => void;
   subscribers: Set<object>;
 };
 
@@ -40,6 +41,28 @@ export type ModelCatalogEntry = {
 
 // Application lifecycle invalidation must not eagerly load catalog readers or presentation.
 export const modelCatalogCache = new WeakMap<ModelCatalogClient, ModelCatalogCache>();
+const observers = new WeakMap<ModelCatalogClient, Set<() => void>>();
+
+export function subscribeModelCatalogCache(
+  client: ModelCatalogClient,
+  listener: () => void,
+): () => void {
+  const listeners = observers.get(client) ?? new Set();
+  observers.set(client, listeners);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      observers.delete(client);
+    }
+  };
+}
+
+function notifyModelCatalogCache(client: ModelCatalogClient): void {
+  for (const listener of Array.from(observers.get(client) ?? [])) {
+    listener();
+  }
+}
 
 export function beginModelCatalogRead(
   client: ModelCatalogClient,
@@ -137,11 +160,6 @@ export function publishModelCatalogResult(
       cache.reads.delete(pending);
     }
   }
-  for (const [budget, pending] of entry.pending) {
-    if (params.refresh || !pending.refresh) {
-      entry.pending.delete(budget);
-    }
-  }
   cache.reads.delete(read);
   if (params.refresh) {
     cache.entries.clear();
@@ -156,7 +174,14 @@ export function publishModelCatalogResult(
   );
   cache.entries.delete(key);
   cache.entries.set(key, entry);
+  for (const [budget, pending] of entry.pending) {
+    if (params.refresh || !pending.refresh) {
+      pending.resolve(result);
+      entry.pending.delete(budget);
+    }
+  }
   trimModelCatalogCache(cache);
+  notifyModelCatalogCache(client);
   return true;
 }
 
@@ -167,6 +192,7 @@ export function invalidateModelCatalogCache(
 ): void {
   if (!scope) {
     modelCatalogCache.delete(client);
+    notifyModelCatalogCache(client);
     return;
   }
   const cache = modelCatalogCache.get(client);
@@ -191,4 +217,5 @@ export function invalidateModelCatalogCache(
       cache.entries.delete(key);
     }
   }
+  notifyModelCatalogCache(client);
 }

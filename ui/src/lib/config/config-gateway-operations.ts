@@ -259,7 +259,7 @@ export async function executeConfigExternalMutation<T>(
   }
 }
 
-type ConfigLoadOptions = LoadConfigOptions & {
+export type ConfigLoadOptions = LoadConfigOptions & {
   background?: boolean;
   beforeApplySnapshot?: () => void;
 };

@@ -14,9 +14,7 @@ describe("loadModelProvidersData", () => {
         if (method === "models.list") {
           return { models, refreshFailed: true };
         }
-        return method === "models.authStatus"
-          ? { ts: 1, providers: [] }
-          : { config: {}, hash: "hash" };
+        return method === "models.authStatus" ? { ts: 1, providers: [] } : {};
       });
       const result = await loadModelProvidersData(client, { agentId: "main" });
       expect(result.models).toEqual(models);
@@ -47,9 +45,6 @@ describe("loadModelProvidersData", () => {
           }
           return { models: [{ id: "published", name: "Published", provider: "ollama" }] };
         }
-        if (method === "config.get") {
-          return { config: {}, hash: "hash" };
-        }
         throw new Error(`Unexpected request: ${method}`);
       });
 
@@ -79,9 +74,6 @@ describe("loadModelProvidersData", () => {
         modelRequests.push(params);
         return { models: [] };
       }
-      if (method === "config.get") {
-        return { config: {}, hash: "hash" };
-      }
       throw new Error(`Unexpected request: ${method}`);
     });
     const controller = new AbortController();
@@ -107,9 +99,7 @@ describe("loadModelProvidersData", () => {
           providerOutcomes: [{ provider: "ollama", status: "unavailable" }],
         };
       }
-      return method === "models.authStatus"
-        ? { ts: 1, providers: [] }
-        : { config: {}, hash: "hash" };
+      return method === "models.authStatus" ? { ts: 1, providers: [] } : {};
     });
     const result = await loadModelProvidersData(client, { agentId: "main", refresh: true });
 
@@ -125,8 +115,6 @@ describe("loadModelProvidersData", () => {
           return { ts: 1, providers: [], providerCapabilities: [] };
         case "models.list":
           return { models: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -142,7 +130,6 @@ describe("loadModelProvidersData", () => {
     expect(request).toHaveBeenCalledWith("models.list", {
       view: "configured",
       agentId: "writer",
-      includeDefaultModels: true,
     });
     expect(
       request.mock.calls.filter(
@@ -163,8 +150,6 @@ describe("loadModelProvidersData", () => {
           return { ts: 1, providers: [] };
         case "models.list":
           return { models: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -182,10 +167,7 @@ describe("loadModelProvidersData", () => {
       agentId: "writer",
     });
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual([
-      [
-        "models.list",
-        { view: "configured", agentId: "writer", includeDefaultModels: true, refresh: true },
-      ],
+      ["models.list", { view: "configured", agentId: "writer", refresh: true }],
     ]);
     expect(result.providerOutcomes).toEqual([]);
     expect(request.mock.calls.some(([method]) => method === "usage.status")).toBe(false);
@@ -197,8 +179,6 @@ describe("loadModelProvidersData", () => {
       switch (method) {
         case "models.authStatus":
           return { ts: 1, providers: [], providerCapabilities: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -233,11 +213,6 @@ describe("loadModelProvidersData", () => {
           };
         case "models.list":
           throw new Error("configured catalog unavailable: OPENAI_API_KEY=sk-1234567890abcdef");
-        case "config.get":
-          return {
-            config: { agents: { defaults: { model: "openai/gpt-5.5" } } },
-            hash: "hash",
-          };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -255,7 +230,6 @@ describe("loadModelProvidersData", () => {
       "configured catalog unavailable: OPENAI_API_KEY=sk-123...cdef",
     );
     expect(result.authStatus?.providers).toHaveLength(1);
-    expect(result.config).toEqual({ agents: { defaults: { model: "openai/gpt-5.5" } } });
     expect(result.error).toBeNull();
   });
 
@@ -270,8 +244,6 @@ describe("loadModelProvidersData", () => {
           return { ts: 1, providers: [], unavailable };
         case "models.list":
           return { models: [{ id: "configured", name: "Configured", provider: "test-provider" }] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         default:
           throw new Error(`Unexpected request: ${method}`);
       }
@@ -295,8 +267,6 @@ describe("loadModelProvidersData", () => {
           return {};
         case "models.list":
           return { models: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -313,7 +283,6 @@ describe("loadModelProvidersData", () => {
     expect(result.models).toEqual([]);
     expect(result.providerOutcomes).toEqual([]);
     expect(result.catalogError).toBeNull();
-    expect(result.config).toEqual({});
     expect(result.providerUsage).toBeNull();
     expect(result.costByProvider).toBeNull();
     expect(result.error).toBeNull();
@@ -326,8 +295,6 @@ describe("loadModelProvidersData", () => {
           return { ts: 1, providers: [] };
         case "models.list":
           return { models: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           throw new Error("usage.status failed");
         case "sessions.usage":
@@ -353,8 +320,6 @@ describe("loadModelProvidersData", () => {
           return { ts: 1, providers: [] };
         case "models.list":
           return { models: [] };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return {
             updatedAt: 1,
@@ -441,8 +406,6 @@ describe("loadModelProvidersData", () => {
           return {
             models: [{ id: "cached", name: "Cached", provider: "openai" }],
           };
-        case "config.get":
-          return { config: {}, hash: "hash" };
         case "usage.status":
           return { updatedAt: 1, providers: [] };
         case "sessions.usage":
@@ -460,11 +423,8 @@ describe("loadModelProvidersData", () => {
     expect(result.catalogError).toBe("catalog refresh failed: OPENAI_API_KEY=sk-123...cdef");
     expect(result.models).toEqual([{ id: "cached", name: "Cached", provider: "openai" }]);
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual([
-      [
-        "models.list",
-        { view: "configured", agentId: "writer", includeDefaultModels: true, refresh: true },
-      ],
-      ["models.list", { view: "configured", agentId: "writer", includeDefaultModels: true }],
+      ["models.list", { view: "configured", agentId: "writer", refresh: true }],
+      ["models.list", { view: "configured", agentId: "writer" }],
     ]);
   });
 });

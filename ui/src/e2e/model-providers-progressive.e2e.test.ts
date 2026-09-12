@@ -46,6 +46,188 @@ describeControlUiE2e("Control UI progressive Model Providers loading", () => {
     await server?.close();
   });
 
+  it("keeps a Models route selection saved before the initial provider details arrive", async () => {
+    const context = await browser.newContext({ locale: "en-US", serviceWorkers: "block" });
+    const page = await context.newPage();
+    const initial = { agents: { defaults: { model: "fixture/initial" } } };
+    const saved = { agents: { defaults: { model: "fixture/chosen" } } };
+    const models = [
+      { id: "initial", name: "Initial model", provider: "fixture", available: true },
+      { id: "chosen", name: "Chosen model", provider: "fixture", available: true },
+    ];
+    const snapshot = (config: typeof initial, hash: string) => ({
+      config,
+      sourceConfig: config,
+      hash,
+      raw: JSON.stringify(config),
+      valid: true,
+    });
+    const gateway = await installMockGateway(page, {
+      defaultAgentId: "main",
+      deferredMethods: ["models.authStatus", "config.patch"],
+      models,
+      methodResponses: {
+        "models.list": { models, defaultModels: { automaticUtilityModel: "fixture/initial" } },
+        "config.get": snapshot(initial, "initial-settings"),
+        "models.authStatus": { ts: 1, providers: [] },
+      },
+    });
+    try {
+      await page.goto(`${server.baseUrl}settings/appearance`);
+      await waitForControlUiRoute(page, { routeId: "appearance" });
+      await gateway.waitForRequest("config.get");
+      await page.evaluate(async () => {
+        const app = document.querySelector<
+          HTMLElement & { runtime: { router: ApplicationRouter } }
+        >("openclaw-app");
+        const route = app?.runtime.router.getRoute("model-providers");
+        if (!route) {
+          throw new Error("Models route is unavailable");
+        }
+        await route.component();
+      });
+      await page.locator('a[href="/settings/model-providers"]').first().click();
+      await gateway.waitForRequest("models.authStatus");
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              document.querySelector<HTMLElement & { loaderPending: boolean }>(
+                "openclaw-model-providers-page",
+              )?.loaderPending,
+          ),
+        )
+        .toBe(true);
+      const defaults = page.locator(".model-providers__defaults");
+      const picker = defaults.locator("openclaw-select-picker").first();
+      const trigger = picker.locator(".picker-select__trigger");
+      await trigger.click();
+      await picker.locator('[role="option"][data-value="fixture/chosen"]').click();
+      await gateway.waitForRequest("config.patch");
+      await gateway.setMethodResponse("config.get", snapshot(saved, "saved-settings"));
+      await gateway.setMethodResponse("models.list", {
+        models: [
+          ...models,
+          { id: "added", name: "Added model", provider: "fixture", available: true },
+        ],
+        defaultModels: { automaticUtilityModel: "fixture/chosen" },
+      });
+      await gateway.resolveDeferred("config.patch", {
+        ok: true,
+        config: saved,
+        hash: "saved-settings",
+      });
+      await expect
+        .poll(() => defaults.getByRole("status").textContent())
+        .toContain("Defaults saved.");
+      await expect.poll(() => trigger.isEnabled()).toBe(true);
+      await gateway.resolveDeferred("models.authStatus");
+      await waitForControlUiRoute(page, { routeId: "model-providers" });
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          }),
+      );
+      expect(await trigger.textContent()).toContain("Chosen model");
+      expect(await defaults.locator("#model-providers-utility-model").textContent()).toContain(
+        "Auto · Chosen model",
+      );
+      await trigger.click();
+      await expect
+        .poll(() => picker.locator('[role="option"][data-value="fixture/added"]').isVisible())
+        .toBe(true);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it.each(["snapshot", "ordinary"] as const)(
+    "opens the Models route from %s catalog publication while auth is pending",
+    async (publicationKind) => {
+      const context = await browser.newContext({ locale: "en-US", serviceWorkers: "block" });
+      const page = await context.newPage();
+      const prepared = {
+        id: "prepared",
+        name: "Prepared model",
+        provider: "fixture",
+        available: true,
+      };
+      const older = { ...prepared, id: "older", name: "Older model" };
+      const added = { ...prepared, id: "added", name: "New model" };
+      const gateway = await installMockGateway(page, {
+        defaultAgentId: "main",
+        models: [older],
+        heldMethods: ["models.list", "models.authStatus", "usage.status", "sessions.usage"],
+        methodResponses: {
+          "config.get": {
+            config: { agents: { defaults: { model: "fixture/prepared" } } },
+            hash: "prepared-settings-model",
+            valid: true,
+          },
+          "models.authStatus": { ts: 1, providers: [] },
+        },
+      });
+      try {
+        if (publicationKind === "snapshot") {
+          await page.goto(`${server.baseUrl}settings/model-providers`);
+        } else {
+          await page.goto(`${server.baseUrl}settings/appearance`);
+          await waitForControlUiRoute(page, { routeId: "appearance" });
+          await page.locator('a[href="/settings/model-providers"]').first().click();
+        }
+        await gateway.waitForRequest("models.list");
+        const publication = {
+          target: {},
+          scope: { agentId: "main" },
+          catalog: {
+            models: [prepared],
+            defaultModels: { automaticUtilityModel: "fixture/prepared" },
+          },
+        };
+        if (publicationKind === "snapshot") {
+          await gateway.emitGatewayEvent("models.snapshot", publication);
+        } else {
+          await gateway.resolveDeferred("models.list", publication.catalog);
+        }
+        const picker = page.locator(".model-providers__defaults openclaw-select-picker").first();
+        const trigger = picker.locator(".picker-select__trigger");
+        await expect.poll(() => trigger.isEnabled()).toBe(true);
+        await trigger.click();
+        const preparedRow = picker.locator('[role="option"][data-value="fixture/prepared"]');
+        await expect.poll(() => preparedRow.isVisible()).toBe(true);
+        await expect.poll(() => preparedRow.textContent()).toContain("Prepared model");
+        expect(await preparedRow.isEnabled()).toBe(true);
+        expect(await gateway.getRequests("models.list")).toHaveLength(1);
+
+        await gateway.resolveDeferred("models.authStatus");
+        await waitForControlUiRoute(page, { routeId: "model-providers" });
+        expect(await trigger.getAttribute("aria-expanded")).toBe("true");
+
+        if (publicationKind === "snapshot") {
+          await gateway.resolveDeferred("models.list", { models: [older] });
+        }
+        await expect.poll(() => preparedRow.isVisible()).toBe(true);
+        expect(await picker.locator('[data-value="fixture/older"]').count()).toBe(0);
+
+        await gateway.deferNext("models.list");
+        await gateway.emitGatewayEvent("chat.metadata.changed", {});
+        await expect.poll(async () => (await gateway.getRequests("models.list")).length).toBe(2);
+        expect(await trigger.getAttribute("aria-expanded")).toBe("true");
+        await gateway.resolveDeferred("models.list", {
+          models: [prepared, added],
+          defaultModels: { automaticUtilityModel: "fixture/added" },
+        });
+        await expect
+          .poll(() => picker.locator('[role="option"][data-value="fixture/added"]').isVisible())
+          .toBe(true);
+        expect(await trigger.getAttribute("aria-expanded")).toBe("true");
+      } finally {
+        await context.close();
+      }
+    },
+  );
+
   it.each(["cold", "prewarmed", "cached"] as const)(
     "renders provider controls before usage and cost settle (%s module)",
     async (moduleState) => {
@@ -110,7 +292,7 @@ describeControlUiE2e("Control UI progressive Model Providers loading", () => {
 
       try {
         const previousLoads = moduleState === "cached" ? 1 : 0;
-        let previousConfigLoads = 0;
+        let previousAuthLoads = 0;
         if (moduleState === "cached") {
           await page.goto(`${server.baseUrl}settings/appearance`);
           await waitForControlUiRoute(page, { routeId: "appearance" });
@@ -129,10 +311,8 @@ describeControlUiE2e("Control UI progressive Model Providers loading", () => {
             await page.goto(`${server.baseUrl}settings/appearance`);
           }
           await waitForControlUiRoute(page, { routeId: "appearance" });
-          // Hold only the route's core request: a competing page load must not
-          // share this gate and conceal the duplicate work.
-          await gateway.deferNext("config.get");
-          previousConfigLoads = (await gateway.getRequests("config.get")).length;
+          await gateway.deferNext("models.authStatus");
+          previousAuthLoads = (await gateway.getRequests("models.authStatus")).length;
           await page.evaluate(async () => {
             const app = document.querySelector<
               HTMLElement & { runtime: { router: ApplicationRouter } }
@@ -153,8 +333,8 @@ describeControlUiE2e("Control UI progressive Model Providers loading", () => {
           await gateway.waitForRequest("models.authStatus");
         } else {
           await expect
-            .poll(async () => (await gateway.getRequests("config.get")).length)
-            .toBeGreaterThan(previousConfigLoads);
+            .poll(async () => (await gateway.getRequests("models.authStatus")).length)
+            .toBeGreaterThan(previousAuthLoads);
         }
         await page.locator("openclaw-model-providers-page").waitFor();
         if (moduleState === "cached") {
@@ -175,7 +355,7 @@ describeControlUiE2e("Control UI progressive Model Providers loading", () => {
         }
         expect(await gateway.getRequests("usage.status")).toHaveLength(previousLoads);
         expect(await gateway.getRequests("sessions.usage")).toHaveLength(previousLoads);
-        await gateway.resolveDeferred(moduleState === "cold" ? "models.authStatus" : "config.get");
+        await gateway.resolveDeferred("models.authStatus");
         await waitForControlUiRoute(page, { routeId: "model-providers" });
         await gateway.waitForRequest("usage.status");
         await gateway.waitForRequest("sessions.usage");

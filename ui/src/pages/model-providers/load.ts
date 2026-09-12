@@ -4,14 +4,12 @@
 import type { SessionModelUsage } from "../../../../src/infra/session-cost-usage.types.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
-  ConfigSnapshot,
   ModelAuthStatusResult,
   ModelCatalogEntry,
   ModelCatalogProviderOutcome,
 } from "../../api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
-import { resolveEditableSnapshotConfig } from "../../lib/config/config-state-model.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import {
   formatMissingOperatorReadScopeMessage,
@@ -37,7 +35,6 @@ export type ModelProvidersData = {
   providerOutcomes: ModelCatalogProviderOutcome[];
   pendingProviders?: readonly string[];
   catalogError: string | null;
-  config: Record<string, unknown> | null;
   providerUsage: ProviderUsageRequestResult | null;
   costByProvider: SessionModelUsage[] | null;
   updatedAt: number | null;
@@ -52,7 +49,6 @@ export const EMPTY_MODEL_PROVIDERS_DATA: ModelProvidersData = {
   automaticUtilityModel: undefined,
   providerOutcomes: [],
   catalogError: null,
-  config: null,
   providerUsage: null,
   costByProvider: null,
   updatedAt: null,
@@ -87,7 +83,6 @@ export async function loadModelProvidersData(
     settleRequest(
       loadModelCatalog(client, {
         agentId: opts.agentId,
-        includeDefaultModels: true,
         ...(refresh ? { refresh: true } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       }),
@@ -102,14 +97,10 @@ export async function loadModelProvidersData(
         refreshResult.ok ? refreshResult : loadConfiguredCatalog(),
       )
     : loadConfiguredCatalog();
-  const [authStatus, catalog, refreshResult, config] = await Promise.all([
+  const [authStatus, catalog, refreshResult] = await Promise.all([
     authStatusLoad,
     catalogLoad,
     catalogRefresh ?? Promise.resolve(undefined),
-    client
-      .request<ConfigSnapshot>("config.get", {}, { signal: opts.signal })
-      .then((snapshot) => resolveEditableSnapshotConfig(snapshot))
-      .catch(() => null),
   ]);
   return {
     authStatus:
@@ -126,7 +117,6 @@ export async function loadModelProvidersData(
         : catalog.ok
           ? modelCatalogRefreshError(catalog.result, t("modelProviders.defaults.discoverFailed"))
           : errorMessage(catalog.error),
-    config,
     providerUsage: null,
     costByProvider: null,
     updatedAt: Date.now(),

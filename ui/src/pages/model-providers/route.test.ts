@@ -13,7 +13,7 @@ import { createAgentCapability } from "../../lib/agents/index.ts";
 import { setAvatarGatewayOrigin } from "../../lib/identity-avatar-context.ts";
 import { page, type ModelProvidersRouteData } from "./route.ts";
 
-const modelMethods = ["models.authStatus", "models.list", "config.get"];
+const modelMethods = ["models.authStatus", "models.list"];
 const roster = {
   defaultId: "main",
   mainKey: "main",
@@ -30,8 +30,6 @@ function responseFor(method: string): unknown {
       return { ts: 1, providers: [{ provider: "openai", status: "ok", profiles: [] }] };
     case "models.list":
       return { models: [{ id: "fixture", provider: "openai", name: "Fixture" }] };
-    case "config.get":
-      return { config: {}, hash: "fixture" };
     default:
       return {};
   }

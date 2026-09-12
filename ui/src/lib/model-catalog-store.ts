@@ -3,6 +3,7 @@ import type {
   ModelsListParams,
   ModelsSnapshotEvent,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { createDeferredCore } from "../../../src/shared/deferred.js";
 import type { ModelCatalogResult } from "../api/types.ts";
 import type { ApplicationGateway } from "../app/context.ts";
 import { t } from "../i18n/index.ts";
@@ -111,36 +112,40 @@ export async function loadModelCatalog(
   const controller = signal ? new AbortController() : undefined;
   const read = beginModelCatalogRead(client, params, controller?.signal);
   const cache = read.cache.entries;
+  const completion = createDeferredCore<ModelCatalogResult>();
   const pending: ModelCatalogRequest = {
     refresh: params.refresh === true,
     controller,
     subscribers: new Set(),
-    promise: (controller || timeoutMs !== undefined
+    resolve: completion.resolve,
+    promise: completion.promise.finally(() => {
+      read.cache.reads.delete(read);
+      if (
+        modelCatalogCache.get(client) === read.cache &&
+        cache.get(key) === entry &&
+        entry.pending.get(timeoutMs) === pending
+      ) {
+        entry.pending.delete(timeoutMs);
+        if (!entry.result && entry.publishedRead === undefined && entry.pending.size === 0) {
+          cache.delete(key);
+        }
+        trimModelCatalogCache(read.cache);
+      }
+    }),
+  };
+  const request =
+    controller || timeoutMs !== undefined
       ? client.request<ModelCatalogResult>("models.list", params, {
           ...(controller ? { signal: controller.signal } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         })
-      : client.request<ModelCatalogResult>("models.list", params)
-    )
-      .then((result) => {
-        publishModelCatalogResult(read, params, result);
-        return result;
-      })
-      .finally(() => {
-        read.cache.reads.delete(read);
-        if (
-          modelCatalogCache.get(client) === read.cache &&
-          cache.get(key) === entry &&
-          entry.pending.get(timeoutMs) === pending
-        ) {
-          entry.pending.delete(timeoutMs);
-          if (!entry.result && entry.publishedRead === undefined && entry.pending.size === 0) {
-            cache.delete(key);
-          }
-          trimModelCatalogCache(read.cache);
-        }
-      }),
-  };
+      : client.request<ModelCatalogResult>("models.list", params);
+  void request
+    .then((result) => {
+      publishModelCatalogResult(read, params, result);
+      completion.resolve(result);
+    })
+    .catch(completion.reject);
   entry.pending.set(timeoutMs, pending);
   cache.delete(key);
   cache.set(key, entry);

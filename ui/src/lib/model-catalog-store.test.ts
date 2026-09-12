@@ -107,6 +107,10 @@ describe("model catalog display cache", () => {
     const scope = { agentId: "writer" };
     const first = loadModelCatalog(client, scope);
     const unlimited = loadModelCatalog(client, { ...scope, timeoutMs: null });
+    let earlierResults: ModelCatalogResult[] | undefined;
+    void Promise.all([first, unlimited]).then((results) => {
+      earlierResults = results;
+    });
     const limited = loadModelCatalog(client, { ...scope, timeoutMs: 30_000 });
     const follower = loadModelCatalog(client, { ...scope, timeoutMs: 30_000 });
     expect(request).toHaveBeenCalledTimes(3);
@@ -123,9 +127,11 @@ describe("model catalog display cache", () => {
     expect(await loadModelCatalog(client, { ...scope, timeoutMs: 5 })).toEqual({
       models: [published],
     });
+    await expect
+      .poll(() => earlierResults)
+      .toEqual([{ models: [published] }, { models: [published] }]);
     inherited.resolve({ models: [prepared] });
     unbounded.resolve({ models: [prepared] });
-    await Promise.all([first, unlimited]);
     expect(await loadModelCatalog(client, scope)).toEqual({ models: [published] });
     expect(await loadModelCatalog(client, { ...scope, timeoutMs: null })).toEqual({
       models: [published],

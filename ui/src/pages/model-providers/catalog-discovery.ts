@@ -89,7 +89,6 @@ export function createCatalogDiscoveryController(
     try {
       const result = await loadModelCatalog(client, {
         agentId,
-        includeDefaultModels: true,
         refresh: true,
         signal: request.signal,
       });
