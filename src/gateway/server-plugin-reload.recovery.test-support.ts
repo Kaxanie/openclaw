@@ -34,7 +34,6 @@ import { createChannelManager } from "./server-channels.js";
 import { reloadGatewayPlugins } from "./server-plugin-reload.js";
 import { createGatewayPluginRuntimeGeneration } from "./server-plugin-runtime-generation.js";
 import { createGatewaySidecarStopOwner } from "./server-sidecar-owners.js";
-import type { GatewayPostReadySidecarHandle } from "./server-startup-post-attach.js";
 
 export async function createPluginReloadRecoveryFixture(
   {
@@ -172,13 +171,7 @@ export async function createPluginReloadRecoveryFixture(
       retireGatewayRuntimeBindings: vi.fn(),
     };
   };
-  let gatewayLifetimeSidecars: GatewayPostReadySidecarHandle[] = [];
-  const lifetime = createGatewaySidecarStopOwner({
-    getRegistered: () => gatewayLifetimeSidecars,
-    setRegistered: (next) => {
-      gatewayLifetimeSidecars = next;
-    },
-  });
+  const lifetime = createGatewaySidecarStopOwner();
   const metadata = retainGatewayPluginMetadata();
   const snapshot =
     options.pluginMetadataSnapshot ??
@@ -187,16 +180,15 @@ export async function createPluginReloadRecoveryFixture(
   const runtime = {
     pluginMetadataSnapshot: snapshot,
     pluginRuntime: registryOwner,
-    kernel: { pluginRuntimeGeneration: owner, pluginMetadata: metadata },
+    kernel: {
+      pluginRuntimeGeneration: owner,
+      pluginMetadata: metadata,
+      getCronService: () => runtime.runtimeState.cronState.cron,
+    },
     runtimeState: {
       cronState: {},
-      get gatewayLifetimeSidecars() {
-        return gatewayLifetimeSidecars;
-      },
-      set gatewayLifetimeSidecars(next: GatewayPostReadySidecarHandle[]) {
-        gatewayLifetimeSidecars = next;
-      },
-      postReadySidecars: [],
+      gatewayLifetimeSidecars: lifetime,
+      postReadySidecars: createGatewaySidecarStopOwner(),
     },
     registerGatewayLifetimeSidecars: lifetime.publish,
     ambientEnvTriggers: "suppress",
@@ -305,6 +297,15 @@ export async function createPluginReloadRecoveryFixture(
 export type RecoveryFixtureFactory = (
   options?: Parameters<typeof createPluginReloadRecoveryFixture>[1],
 ) => ReturnType<typeof createPluginReloadRecoveryFixture>;
+
+export function createRecoveryChannelManager(fixture: Awaited<ReturnType<RecoveryFixtureFactory>>) {
+  return createChannelManager({
+    getRuntimeConfig: fixture.getConfig,
+    getPluginRegistry: () => fixture.registryOwner.registry,
+    channelLogs: {},
+    channelRuntimeEnvs: {},
+  });
+}
 
 export async function verifyMalformedReloadFailureReceipt(
   createRecoveryFixture: RecoveryFixtureFactory,
@@ -420,12 +421,7 @@ export async function verifyChannelReplacementContracts(
       });
     },
   });
-  const manager = createChannelManager({
-    getRuntimeConfig: fixture.getConfig,
-    getPluginRegistry: () => fixture.registryOwner.registry,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
+  const manager = createRecoveryChannelManager(fixture);
   fixture.runtime.channelManager = manager;
   try {
     await manager.startChannel(channelId);
@@ -484,12 +480,7 @@ export async function verifyColdAccountReplacement(createRecoveryFixture: Recove
       });
     },
   });
-  const manager = createChannelManager({
-    getRuntimeConfig: fixture.getConfig,
-    getPluginRegistry: () => fixture.registryOwner.registry,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
+  const manager = createRecoveryChannelManager(fixture);
   fixture.runtime.channelManager = manager;
   setActiveDegradedSecretOwners([
     {
@@ -564,12 +555,7 @@ export async function verifyChannelCleanupFailureFence(
       });
     },
   });
-  const manager = createChannelManager({
-    getRuntimeConfig: fixture.getConfig,
-    getPluginRegistry: () => fixture.registryOwner.registry,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
+  const manager = createRecoveryChannelManager(fixture);
   fixture.runtime.channelManager = manager;
   await manager.startChannel("cleanup-first");
   await manager.startChannel("cleanup-sibling");

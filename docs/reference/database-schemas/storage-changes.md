@@ -36,8 +36,16 @@ kernels. Their existing facades retain global connection acquisition, cache and
 close behavior, and write transaction admission. Compound subagent and cron
 operations call the kernels on their already-admitted connection. Task status
 classification stays with the pure record types, so decoding does not load
-provider or plugin runtime ownership. These operations and their transaction
-callbacks remain synchronous; this separation does not move SQL to a worker.
+provider or plugin runtime ownership. Kernels and their transaction callbacks
+remain synchronous. The asynchronous task and flow read facade runs these read
+kernels in the shared-state worker.
+
+The host captures the database path, state environment, and current admission
+before awaited work. The shared worker owns its canonical connection and schema
+opening, with Gateway schema authority delegated by its live coordinator owner.
+Classified database errors survive transport, and canonical close joins worker
+operations and native cleanup. Cold registry restoration and runtime-configuration
+preparation still retain their existing main-thread behavior.
 
 SQLite worker transport preserves complete result values. Results within the
 64 MiB inline reply budget keep their existing reply path; larger results are
@@ -46,6 +54,14 @@ its worker until the complete result and cleanup are acknowledged, including
 during shutdown. Framing does not paginate or repeat the database query, truncate
 results, or change request and queue budgets. Callers still materialize their
 complete result in memory.
+
+Worker execute inputs also use bounded frames when necessary. Queued commands
+retain their full serialized-byte charge, up to the existing 64 MiB aggregate
+budget. Larger commands require immediate admission to an idle worker and reserve
+a 32 MiB transport window through settlement. Otherwise, admission returns the
+existing overload error without queuing the value or executing any part of it.
+Only complete validated input reaches the backend. The transport queue remains
+bounded; an active complete input or result still requires its materialized memory.
 
 Acquire a connection once for an operation and pass that exact connection
 through its transactional helpers. SQLite write callbacks remain synchronous:

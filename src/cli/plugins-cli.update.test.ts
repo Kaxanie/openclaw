@@ -37,34 +37,10 @@ import {
   writePersistedInstalledPluginIndexInstallRecordsWithLeaseMock,
 } from "./plugins-cli-test-helpers.js";
 import { registerPluginsCli } from "./plugins-cli.js";
+import { createCliTtyMock } from "./test-runtime-capture.js";
 
 const ORIGINAL_OPENCLAW_NIX_MODE = process.env.OPENCLAW_NIX_MODE;
-const ORIGINAL_STDIN_TTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-const ORIGINAL_STDOUT_TTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-
-function setTty(value: boolean): void {
-  Object.defineProperty(process.stdin, "isTTY", {
-    value,
-    configurable: true,
-  });
-  Object.defineProperty(process.stdout, "isTTY", {
-    value,
-    configurable: true,
-  });
-}
-
-function restoreTty(): void {
-  if (ORIGINAL_STDIN_TTY) {
-    Object.defineProperty(process.stdin, "isTTY", ORIGINAL_STDIN_TTY);
-  } else {
-    Reflect.deleteProperty(process.stdin, "isTTY");
-  }
-  if (ORIGINAL_STDOUT_TTY) {
-    Object.defineProperty(process.stdout, "isTTY", ORIGINAL_STDOUT_TTY);
-  } else {
-    Reflect.deleteProperty(process.stdout, "isTTY");
-  }
-}
+const { set: setTty, restore: restoreTty } = createCliTtyMock();
 
 function createTrackedPluginConfig(params: {
   pluginId: string;
@@ -552,16 +528,24 @@ describe("plugins cli update", () => {
   });
 
   it.each([
+    { failure: "plugin install", settlement: "rollback" },
     { failure: "later hook install", settlement: "rollback" },
     { failure: "config write", settlement: "rollback" },
     { failure: "backup cleanup", settlement: "commit" },
-  ])("settles hook updates when $failure fails", async ({ failure, settlement }) => {
+  ])("settles package updates when $failure fails", async ({ failure, settlement }) => {
     primeUpdateConfigSnapshot({ config: {} });
-    setHookInstallRecords({
-      "demo-hooks": { source: "npm", spec: "@acme/demo-hooks@1.0.0" },
-    });
+    const pluginInstall = failure === "plugin install";
+    if (pluginInstall) {
+      setInstalledPluginIndexInstallRecords({
+        alpha: { source: "npm", spec: "@acme/alpha@1.0.0", installPath: "/tmp/alpha" },
+      });
+    } else {
+      setHookInstallRecords({
+        "demo-hooks": { source: "npm", spec: "@acme/demo-hooks@1.0.0" },
+      });
+    }
     const events: string[] = [];
-    updateNpmInstalledHookPacksMock.mockImplementation(async (params) => {
+    const install = async (params: { config: OpenClawConfig }) => {
       resolvePluginInstallTransactionRequest(params)?.transactionSink?.push({
         commit: async () => {
           events.push("commit");
@@ -573,16 +557,21 @@ describe("plugins cli update", () => {
           events.push("rollback");
         },
       });
-      if (failure === "later hook install") {
+      if (pluginInstall || failure === "later hook install") {
         throw new Error(failure);
       }
       return { config: params.config, changed: true, outcomes: [] };
-    });
+    };
+    if (pluginInstall) {
+      updateNpmInstalledPluginsMock.mockImplementation(install);
+    } else {
+      updateNpmInstalledHookPacksMock.mockImplementation(install);
+    }
     if (failure === "config write") {
       replaceConfigFileMock.mockRejectedValueOnce(new Error(failure));
     }
 
-    const update = runPluginsCommand(["plugins", "update", "demo-hooks"]);
+    const update = runPluginsCommand(["plugins", "update", pluginInstall ? "alpha" : "demo-hooks"]);
     if (settlement === "commit") {
       await update;
       expectOfflineNoticeLogged();

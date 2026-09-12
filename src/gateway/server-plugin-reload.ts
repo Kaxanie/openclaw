@@ -164,29 +164,14 @@ export async function reloadGatewayPlugins(
   const skipChannels =
     isTruthyEnvValue(params.env?.OPENCLAW_SKIP_CHANNELS) ||
     isTruthyEnvValue(params.env?.OPENCLAW_SKIP_PROVIDERS);
-  const stopReplacedChannels = async () => {
-    for (const { plugin } of previousRegistry.channels) {
-      if (!channelTargets.has(plugin.id)) {
-        continue;
-      }
-      await cleanup(`Plugin channel ${plugin.id} cleanup failed`, () =>
-        channelManager.stopChannel(plugin.id, undefined, {
-          manual: false,
-          strict: true,
-          routeHandoff: true,
-        }),
-      );
-    }
-  };
-  const stopReplacedServices = async (services: PluginServicesHandle | null | undefined) => {
-    await cleanup("Plugin service cleanup failed", async () => {
+  const stopReplacedServices = (services: PluginServicesHandle | null | undefined) =>
+    cleanup("Plugin service cleanup failed", async () => {
       await services?.stop({
         strict: true,
         deadlineAtMs: Date.now() + PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS,
         pluginIds: changedPluginIds,
       });
     });
-  };
   const startReplacedChannels = async (registry: typeof previousRegistry, errors: unknown[]) => {
     for (const { plugin } of registry.channels) {
       if (skipChannels || !channelTargets.has(plugin.id)) {
@@ -245,7 +230,7 @@ export async function reloadGatewayPlugins(
       config,
       workspaceDir: pluginWorkspaceDir,
       // SAFETY: Gateway cron implements the SDK hook surface, which erases core-only job fields.
-      getCron: () => runtimeState.cronState.cron as PluginHookGatewayCronService,
+      getCron: kernel.getCronService as () => PluginHookGatewayCronService,
     };
     await withPluginHttpRouteRegistry(registry, () =>
       start
@@ -361,7 +346,7 @@ export async function reloadGatewayPlugins(
     params.prepareConfigEffects({ pluginIds: changedPluginIds, channels: channelTargets });
     releaseChannelStarts = channelManager.pauseChannelStarts(channelTargets);
     phase = "drain";
-    for (const sidecar of runtimeState.gatewayLifetimeSidecars) {
+    for (const sidecar of runtimeState.gatewayLifetimeSidecars.snapshot()) {
       const prepared = sidecar.preparePluginReload?.({
         previousRegistry,
         nextRegistry,
@@ -409,7 +394,18 @@ export async function reloadGatewayPlugins(
     await cleanup("Plugin stop hook failed", () =>
       runLifecycleHooks(previousRegistry, false, previousConfig),
     );
-    await stopReplacedChannels();
+    for (const { plugin } of previousRegistry.channels) {
+      if (!channelTargets.has(plugin.id)) {
+        continue;
+      }
+      await cleanup(`Plugin channel ${plugin.id} cleanup failed`, () =>
+        channelManager.stopChannel(plugin.id, undefined, {
+          manual: false,
+          strict: true,
+          routeHandoff: true,
+        }),
+      );
+    }
     await stopReplacedServices(previousServices);
     for (const record of previousRegistry.plugins) {
       if (changedPluginIds.has(record.id)) {
@@ -430,7 +426,7 @@ export async function reloadGatewayPlugins(
         config: params.nextConfig,
         workspaceDir: pluginWorkspaceDir,
         broadcastPluginEvent,
-        getCronService: () => runtimeState.cronState.cron,
+        getCronService: kernel.getCronService,
         previous: previousServices,
         onHandle: (handle) => {
           candidateServices = handle;
@@ -613,7 +609,7 @@ export async function reloadGatewayPlugins(
               config: previousConfig,
               workspaceDir: pluginWorkspaceDir,
               broadcastPluginEvent,
-              getCronService: () => runtimeState.cronState.cron,
+              getCronService: kernel.getCronService,
               previous: kernel.pluginRuntimeGeneration.currentServices(),
               onHandle: (handle) => {
                 kernel.pluginRuntimeGeneration.publishServices(

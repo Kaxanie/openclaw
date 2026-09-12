@@ -9,8 +9,10 @@ import {
 import { startPluginServices } from "../plugins/services.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
-import { createChannelManager } from "./server-channels.js";
-import type { RecoveryFixtureFactory } from "./server-plugin-reload.recovery.test-support.js";
+import {
+  createRecoveryChannelManager,
+  type RecoveryFixtureFactory,
+} from "./server-plugin-reload.recovery.test-support.js";
 import { GatewayConfigReloadSupersededError } from "./server-reload-contracts.js";
 
 export async function verifyManagedCandidateRetirement(
@@ -112,7 +114,7 @@ export async function verifyManagedCandidateRetirement(
     expect(order.filter((entry) => entry.endsWith(":2"))).toEqual([]);
     expect(process.listenerCount(event)).toBe(before);
     expect(queuedStart).not.toHaveBeenCalled();
-    expect(fixture.runtime.runtimeState.gatewayLifetimeSidecars).toEqual([]);
+    expect(fixture.runtime.runtimeState.gatewayLifetimeSidecars.snapshot()).toEqual([]);
     if (action === "shutdown") {
       shuttingDown = fixture.lifetime.sealAndJoin();
     } else {
@@ -288,12 +290,7 @@ export async function verifyGatewayCleanupRetry(
       }
     },
   });
-  const manager = createChannelManager({
-    getRuntimeConfig: fixture.getConfig,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-    getPluginRegistry: () => fixture.registryOwner.registry,
-  });
+  const manager = createRecoveryChannelManager(fixture);
   if (withChannels) {
     fixture.runtime.channelManager = manager;
     await manager.startChannel(channelIds.first);
@@ -472,7 +469,7 @@ export async function verifyCandidateCleanupRecovery(
   expect(fixture.siblingStop).toHaveBeenCalledOnce();
   expect(fixture.candidateStop).toHaveBeenCalledTimes(2);
   await expect(fixture.lifetime.stop()).resolves.toBeUndefined();
-  expect(fixture.runtime.runtimeState.gatewayLifetimeSidecars).toEqual([]);
+  expect(fixture.runtime.runtimeState.gatewayLifetimeSidecars.snapshot()).toEqual([]);
 }
 
 export async function verifyCommittedRetirementOwnership(
