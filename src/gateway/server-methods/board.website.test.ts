@@ -73,7 +73,11 @@ describe("website dashboard authoring", () => {
     expect((await store.getSnapshot({ sessionKey })).widgets).toEqual([]);
   });
 
-  it.each([
+  const invalidWebsiteCases: Array<{
+    name: string;
+    props: Record<string, unknown>;
+    error?: RegExp;
+  }> = [
     { name: "missing URL", props: {} },
     { name: "empty URL", props: { url: "" } },
     { name: "relative URL", props: { url: "/dashboard" } },
@@ -93,6 +97,20 @@ describe("website dashboard authoring", () => {
     }),
     { name: "oversized URL", props: { url: `https://status.example/${"a".repeat(2048)}` } },
     {
+      name: "oversized URL shortened by normalization",
+      props: { url: `https://status.example/${"a/../".repeat(500)}` },
+    },
+    {
+      name: "oversized props shortened by normalization",
+      props: { url: `https://status.example/${"a/../".repeat(2000)}` },
+      error: /props exceed 8192/,
+    },
+    {
+      name: "oversized encoded props within the URL character limit",
+      props: { url: `${"\u0000".repeat(1400)}https://status.example` },
+      error: /props exceed 8192/,
+    },
+    {
       name: "extra HTML",
       props: { url: "https://status.example", html: "<script>alert(1)</script>" },
     },
@@ -100,19 +118,23 @@ describe("website dashboard authoring", () => {
       name: "extra sandbox permissions",
       props: { url: "https://status.example", sandbox: "allow-top-navigation" },
     },
-  ])("rejects invalid website props without changing a saved board: $name", async ({ props }) => {
-    const { tool, store, broadcast } = createWebsiteHarness();
-    const widget = {
-      action: "widget_put",
-      name: "status",
-      pluginKind: "session:website",
-      props: { url: "https://status.example" },
-    };
-    await tool.execute("create", widget);
-    const before = await store.getSnapshot({ sessionKey });
-    broadcast.mockClear();
-    await expect(tool.execute("invalid", { ...widget, props })).rejects.toThrow(/Website/);
-    expect(await store.getSnapshot({ sessionKey })).toEqual(before);
-    expect(broadcast).not.toHaveBeenCalled();
-  });
+  ];
+  it.each(invalidWebsiteCases)(
+    "rejects invalid website props without changing a saved board: $name",
+    async ({ props, error = /Website/ }) => {
+      const { tool, store, broadcast } = createWebsiteHarness();
+      const widget = {
+        action: "widget_put",
+        name: "status",
+        pluginKind: "session:website",
+        props: { url: "https://status.example" },
+      };
+      await tool.execute("create", widget);
+      const before = await store.getSnapshot({ sessionKey });
+      broadcast.mockClear();
+      await expect(tool.execute("invalid", { ...widget, props })).rejects.toThrow(error);
+      expect(await store.getSnapshot({ sessionKey })).toEqual(before);
+      expect(broadcast).not.toHaveBeenCalled();
+    },
+  );
 });

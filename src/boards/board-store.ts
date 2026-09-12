@@ -237,16 +237,15 @@ function validatePluginContent(params: BoardWidgetMaterializedPutParams): void {
     parseBoardReport(params.content.props);
     return;
   }
-  if (params.content.pluginKind === BOARD_WEBSITE_WIDGET_KIND) {
-    parseBoardWebsite(params.content.props);
-    return;
-  }
   const propsBytes = Buffer.byteLength(JSON.stringify(params.content.props ?? {}), "utf8");
   if (propsBytes > BOARD_WIDGET_PROPS_MAX_BYTES) {
     throw new BoardValidationError(
       "invalid_operation",
       `board plugin widget props exceed ${BOARD_WIDGET_PROPS_MAX_BYTES} UTF-8 bytes`,
     );
+  }
+  if (params.content.pluginKind === BOARD_WEBSITE_WIDGET_KIND) {
+    parseBoardWebsite(params.content.props);
   }
 }
 
