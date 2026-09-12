@@ -355,10 +355,7 @@ async function readConfig(
     }
     return failure(message);
   } finally {
-    if (
-      !options.background &&
-      isCurrentRequest(state, "config", version, client, connectionEpoch)
-    ) {
+    if (isCurrentRequest(state, "config", version, client, connectionEpoch)) {
       state.configLoading = false;
     }
   }

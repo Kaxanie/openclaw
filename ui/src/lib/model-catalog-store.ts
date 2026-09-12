@@ -9,6 +9,7 @@ import type { ApplicationGateway } from "../app/context.ts";
 import { t } from "../i18n/index.ts";
 import {
   invalidateModelCatalogCache,
+  invalidateModelCatalogEntry,
   beginModelCatalogRead,
   modelCatalogCache,
   modelCatalogKey,
@@ -68,14 +69,16 @@ export function modelCatalogRefreshError(
 export function peekModelCatalog(
   client: ModelCatalogClient,
   options: ModelsListParams,
+  { allowStale = false }: { allowStale?: boolean } = {},
 ): ModelCatalogResult | undefined {
   const cache = modelCatalogCache.get(client)?.entries;
   const key = modelCatalogKey(modelCatalogParams(options));
   const entry = cache?.get(key);
   if (entry?.expiresAt !== undefined && entry.expiresAt <= Date.now()) {
-    entry.result = undefined;
-    entry.expiresAt = undefined;
+    invalidateModelCatalogEntry(entry);
     // Keep ordering until bounded eviction so an older unresolved read cannot refill this slot.
+  }
+  if (entry?.invalidated && !allowStale) {
     return undefined;
   }
   if (cache && entry?.result) {

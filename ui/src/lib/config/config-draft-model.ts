@@ -24,6 +24,7 @@ import { parseJson5Text, warmJson5 } from "../json5-runtime.ts";
 import {
   resolveAgentConfigEntryTarget,
   resolveEditableSnapshotConfig,
+  setConfigSnapshot,
   type LoadConfigOptions,
   type RuntimeConfigState,
 } from "./config-state-model.ts";
@@ -137,7 +138,7 @@ export function applyConfigSnapshot(
     state.configNeedsApply = currentRevisionHash !== snapshot.appliedConfigHash;
   }
   const draftBaseHash = state.configDraftBaseHash ?? state.configSnapshot?.hash ?? null;
-  state.configSnapshot = snapshot;
+  setConfigSnapshot(state, snapshot);
   const editableConfig = resolveEditableSnapshotConfig(snapshot);
   const rawAvailable =
     typeof snapshot.raw === "string" || Boolean(editableConfig) || Boolean(state.configForm);
@@ -450,7 +451,7 @@ export function adoptConfigWriteAck(
       : staleForm
         ? null
         : replayConfigDraftEdits(submitted.form, currentForm, ack.config);
-  state.configSnapshot = {
+  setConfigSnapshot(state, {
     ...state.configSnapshot,
     raw: acknowledgedRaw,
     hash: ack.hash,
@@ -458,7 +459,7 @@ export function adoptConfigWriteAck(
     issues: [],
     config: ack.config,
     sourceConfig: ack.config,
-  };
+  });
   state.configDraftBaseHash = ack.hash;
   state.configValid = true;
   state.configIssues = [];

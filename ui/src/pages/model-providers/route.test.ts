@@ -11,6 +11,7 @@ import {
 } from "../../app/gateway-store.test-support.ts";
 import { createAgentCapability } from "../../lib/agents/index.ts";
 import { setAvatarGatewayOrigin } from "../../lib/identity-avatar-context.ts";
+import { peekModelCatalog } from "../../lib/model-catalog-store.ts";
 import { page, type ModelProvidersRouteData } from "./route.ts";
 
 const modelMethods = ["models.authStatus", "models.list"];
@@ -136,11 +137,13 @@ describe("Models route admission", () => {
         agentId: selection.state.selectedId,
         data: {
           authStatus: responseFor("models.authStatus"),
-          models: [{ id: "fixture", provider: "openai", name: "Fixture" }],
           error: null,
           updatedAt: expect.any(Number),
         },
       });
+      expect(
+        peekModelCatalog(gateway.snapshot.client!, { agentId: selection.state.selectedId! }),
+      ).toEqual(responseFor("models.list"));
     },
   );
 

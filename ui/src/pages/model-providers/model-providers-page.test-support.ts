@@ -3,9 +3,11 @@ import type { GatewayBrowserClient, GatewayEventFrame } from "../../api/gateway.
 import type {
   ModelAuthStatusProvider,
   ModelAuthStatusResult,
+  ModelCatalogResult,
   ModelsProbeResult,
 } from "../../api/types.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
+import type { SelectPicker } from "../../components/select-picker.ts";
 import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-cache.ts";
 import type {
   RuntimeConfigExternalMutationOptions,
@@ -20,7 +22,10 @@ import {
   type RuntimeConfigCapability,
 } from "../../lib/config/runtime-config-capability.ts";
 import { invalidateModelAuthStatusRequests } from "../../lib/model-auth-request-state.ts";
+import { beginModelCatalogRead, publishModelCatalogResult } from "../../lib/model-catalog-cache.ts";
+import { peekModelCatalog } from "../../lib/model-catalog-store.ts";
 import { createApplicationGateway } from "../../test-helpers/application-context.ts";
+import { updatePickers } from "../../test-helpers/select-picker.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import type { ModelBehaviorConfig } from "./config-mutation.ts";
 import type { DefaultModelSelection } from "./data.ts";
@@ -64,6 +69,44 @@ export type ModelProvidersPageTestElement = HTMLElement & {
 export type AgentSelectElement = HTMLElement & {
   onSelect: (value: string) => void;
 };
+
+export function modelPickers(page: Element): SelectPicker[] {
+  return [
+    ...page.querySelectorAll<SelectPicker>(".model-providers__defaults openclaw-select-picker"),
+  ];
+}
+
+export function displayedCatalog(page: ModelProvidersPageTestElement) {
+  return peekModelCatalog(
+    page.context.gateway.snapshot.client!,
+    { agentId: page.selectedAgentId },
+    { allowStale: true },
+  );
+}
+
+export function publishCatalog(
+  context: ApplicationContext,
+  agentId: string,
+  result: ModelCatalogResult,
+) {
+  const client = context.gateway.snapshot.client!;
+  const scope = { agentId };
+  expect(publishModelCatalogResult(beginModelCatalogRead(client, scope), scope, result)).toBe(true);
+}
+
+export async function openModelPicker(page: HTMLElement, index = 0): Promise<void> {
+  await updatePickers(page);
+  const picker = modelPickers(page)[index];
+  expect(picker).toBeDefined();
+  const trigger = picker!.querySelector<HTMLButtonElement>(".picker-select__trigger");
+  expect(trigger).not.toBeNull();
+  if (trigger!.getAttribute("aria-expanded") === "true") {
+    trigger!.click();
+    await picker!.updateComplete;
+  }
+  trigger!.click();
+  await picker!.updateComplete;
+}
 
 export function createAuthStatus(
   providers: Partial<ModelAuthStatusProvider>[] = [{}],

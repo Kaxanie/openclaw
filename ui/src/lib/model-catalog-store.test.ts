@@ -7,7 +7,11 @@ import {
   createGatewayRequestMock,
   createTestGatewayClient,
 } from "../test-helpers/gateway-client.ts";
-import { invalidateModelCatalogCache } from "./model-catalog-cache.ts";
+import {
+  clearModelCatalogCache,
+  invalidateModelCatalogCache,
+  modelCatalogCache,
+} from "./model-catalog-cache.ts";
 import { loadModelCatalog, peekModelCatalog } from "./model-catalog-store.ts";
 
 const prepared = { id: "prepared", name: "Prepared", provider: "example" };
@@ -59,7 +63,11 @@ describe("model catalog display cache", () => {
     expect(request).toHaveBeenCalledTimes(1);
     invalidateModelCatalogCache(client);
     expect(peekModelCatalog(client, scope)).toBeUndefined();
+    expect(peekModelCatalog(client, scope, { allowStale: true })?.models).toEqual([prepared]);
     expect((await loadModelCatalog(client, scope)).models).toEqual([published]);
+    expect(peekModelCatalog(client, scope, { allowStale: true })?.models).toEqual([published]);
+    clearModelCatalogCache(client);
+    expect(peekModelCatalog(client, scope, { allowStale: true })).toBeUndefined();
   });
 
   it("keeps every projection and connection separate while normalizing equivalent requests", async () => {
@@ -216,11 +224,14 @@ describe("model catalog display cache", () => {
     const refresh = createDeferred<ModelCatalogResult>();
     const duringRefresh = createDeferred<ModelCatalogResult>();
     const request = createGatewayRequestMock()
+      .mockResolvedValueOnce({ models: [prepared] })
       .mockImplementationOnce(() => stale.promise)
       .mockImplementationOnce(() => refresh.promise)
       .mockImplementationOnce(() => duringRefresh.promise)
       .mockResolvedValue({ models: [published] });
     const client = createTestGatewayClient(request);
+    const retainedScope = { agentId: "reader" };
+    await loadModelCatalog(client, retainedScope);
     const old = loadModelCatalog(client, { agentId: "writer" });
     const replacement = loadModelCatalog(client, { view: "provider-config", refresh: true });
     const interim = loadModelCatalog(client, { agentId: "writer" });
@@ -228,14 +239,18 @@ describe("model catalog display cache", () => {
     expect(await old).toEqual({ models: [prepared] });
     refresh.resolve({ models: [published] });
     expect(await replacement).toEqual({ models: [published] });
+    expect(peekModelCatalog(client, retainedScope)).toBeUndefined();
+    expect(peekModelCatalog(client, retainedScope, { allowStale: true })?.models).toEqual([
+      prepared,
+    ]);
     duringRefresh.resolve({ models: [prepared] });
     await interim;
     expect((await loadModelCatalog(client, { agentId: "writer" })).models).toEqual([published]);
     expect((await loadModelCatalog(client, { view: "provider-config" })).models).toEqual([
       published,
     ]);
-    expect(request).toHaveBeenCalledTimes(4);
-    expect(request.mock.calls[1]?.[1]).toEqual({ view: "provider-config", refresh: true });
+    expect(request).toHaveBeenCalledTimes(5);
+    expect(request.mock.calls[2]?.[1]).toEqual({ view: "provider-config", refresh: true });
   });
 
   it.each([false, true])(
@@ -405,6 +420,16 @@ describe("model catalog display cache", () => {
     cold.resolve({ models: [published] });
     await concurrent;
     expect(scopes.filter((scope) => peekModelCatalog(client, scope))).toHaveLength(64);
+    const retired = createDeferred<ModelCatalogResult>();
+    request.mockImplementation(() => retired.promise);
+    const retiring = Promise.all(
+      scopes.map((_, index) => loadModelCatalog(client, { sessionKey: `retired:${index}` })),
+    );
+    invalidateModelCatalogCache(client);
+    expect(modelCatalogCache.get(client)?.entries.size).toBeLessThanOrEqual(64);
+    retired.resolve({ models: [prepared] });
+    await retiring;
+    expect(modelCatalogCache.get(client)?.entries.size).toBeLessThanOrEqual(64);
   });
 
   it("rejects an already retired request before transport or cached publication", async () => {

@@ -102,12 +102,12 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
       }
     },
     onComplete: ({ client, data }) => {
-      const preserveCatalog =
+      const preserveCatalogDiagnostics =
         this.data !== null && this.catalogDiscovery.generation !== this.coreCatalogGeneration;
-      if (!preserveCatalog) {
+      if (!preserveCatalogDiagnostics) {
         this.catalogDiscovery.reset();
       }
-      this.supplemental.adoptCoreData(client, data, { preserveCatalog });
+      this.supplemental.adoptCoreData(client, data, { preserveCatalogDiagnostics });
     },
     isCatalogLoading: () => this.catalogDiscovery.discovering,
     refreshPublication: () => void this.refresh("publication"),
@@ -619,7 +619,11 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     const config = readModelProviderConfig(configObject);
     const catalog =
       gatewaySnapshot.client && this.selectedAgentId
-        ? peekModelCatalog(gatewaySnapshot.client, { agentId: this.selectedAgentId })
+        ? peekModelCatalog(
+            gatewaySnapshot.client,
+            { agentId: this.selectedAgentId },
+            { allowStale: true },
+          )
         : undefined;
     const configuredDefaults = {
       ...config.defaults,
@@ -633,6 +637,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     };
     const cards = buildModelProviderCards({
       ...data,
+      models: catalog?.models ?? null,
       providerUsage: data.providerUsage?.ok ? data.providerUsage.value : null,
       configProviderIds: config.providerIds,
       configApiKeyProviderIds: config.apiKeyProviderIds,
@@ -659,19 +664,16 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
       costDays: MODEL_PROVIDERS_COST_DAYS,
       credentialAgentLabel: selected ? normalizeAgentLabel(selected) : this.selectedAgentId,
       cards,
-      configuredModels: buildSelectableDefaultModels(catalog?.models ?? data.models, defaults),
+      configuredModels: buildSelectableDefaultModels(catalog?.models ?? null, defaults),
       defaultModels: defaults,
       authStatus: data.authStatus,
-      automaticUtilityModel: catalog
-        ? catalog.defaultModels?.automaticUtilityModel
-        : data.automaticUtilityModel,
+      automaticUtilityModel: catalog?.defaultModels?.automaticUtilityModel,
       thinkingLevel: defaults.thinkingLevel,
       thinkingOverridden: defaults.thinkingOverridden,
       fastMode: defaults.fastMode,
       fastModeOverridden: defaults.fastModeOverridden,
       catalogDiscovering:
-        this.catalogDiscovery.discovering ||
-        Boolean((catalog ? catalog.pendingProviders : data.pendingProviders)?.length),
+        this.catalogDiscovery.discovering || Boolean(catalog?.pendingProviders?.length),
       catalogDiscoveryError: this.catalogDiscovery.error ?? data.catalogError,
       configBusy: this.configBusy(),
       quickAddSupported: data.authStatus?.providerCapabilities !== undefined,

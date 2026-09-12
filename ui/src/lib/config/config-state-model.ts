@@ -48,6 +48,7 @@ const requestVersionsByState = new WeakMap<
   { config: number; schema: number }
 >();
 const connectionEpochsByState = new WeakMap<object, number>();
+const snapshotEpochsByState = new WeakMap<object, number>();
 export type ConfigRead = {
   version: number;
   client: GatewayBrowserClient;
@@ -162,6 +163,15 @@ export function currentConfigConnectionEpoch(state: object): number {
   return connectionEpochsByState.get(state) ?? 0;
 }
 
+export function setConfigSnapshot(state: RuntimeConfigState, snapshot: ConfigSnapshot): void {
+  state.configSnapshot = snapshot;
+  snapshotEpochsByState.set(state, currentConfigConnectionEpoch(state));
+}
+
+export function isConfigSnapshotCurrent(state: object): boolean {
+  return (snapshotEpochsByState.get(state) ?? 0) === currentConfigConnectionEpoch(state);
+}
+
 export function invalidateConfigConnection(state: object): void {
   invalidateConfigRead(state);
   connectionEpochsByState.set(state, currentConfigConnectionEpoch(state) + 1);
@@ -192,7 +202,6 @@ export function isCurrentRequest(
   );
 }
 
-/** Resolves true only when a current-epoch snapshot was actually applied. */
 export function resolveEditableSnapshotConfig(
   snapshot: ConfigSnapshot | null | undefined,
 ): Record<string, unknown> | null {
@@ -206,7 +215,9 @@ export function resolveEditableSnapshotConfig(
 export function currentConfigObject(
   state: Pick<RuntimeConfigState, "configForm" | "configSnapshot">,
 ): Record<string, unknown> | null {
-  return state.configForm ?? resolveEditableSnapshotConfig(state.configSnapshot);
+  return isConfigSnapshotCurrent(state)
+    ? (state.configForm ?? resolveEditableSnapshotConfig(state.configSnapshot))
+    : null;
 }
 export type AgentConfigEntryTarget = {
   path: ["agents", "entries", string];

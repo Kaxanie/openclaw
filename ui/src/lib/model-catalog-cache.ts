@@ -34,6 +34,7 @@ export type ModelCatalogRead = {
 export type ModelCatalogEntry = {
   scope: ModelCatalogReadScope;
   result?: ModelCatalogResult;
+  invalidated?: boolean;
   expiresAt?: number;
   publishedRead?: number;
   pending: Map<GatewayProtocolRequestOptions["timeoutMs"], ModelCatalogRequest>;
@@ -162,10 +163,15 @@ export function publishModelCatalogResult(
   }
   cache.reads.delete(read);
   if (params.refresh) {
-    cache.entries.clear();
+    for (const other of cache.entries.values()) {
+      if (other !== entry) {
+        invalidateModelCatalogEntry(other);
+      }
+    }
     cache.reads.clear();
   }
   entry.result = result;
+  entry.invalidated = false;
   entry.publishedRead = read.order;
   // Cooldown expiry changes readiness without publishing a new Gateway generation.
   entry.expiresAt = result.models.reduce(
@@ -185,21 +191,29 @@ export function publishModelCatalogResult(
   return true;
 }
 
-/** Retire display copies and sharing eligibility before any consumer starts its next read. */
+export function invalidateModelCatalogEntry(entry: ModelCatalogEntry): void {
+  entry.invalidated = true;
+  entry.expiresAt = undefined;
+  entry.pending.clear();
+}
+
+/** A connection boundary retires even the last accepted display snapshot. */
+export function clearModelCatalogCache(client: ModelCatalogClient): void {
+  modelCatalogCache.delete(client);
+  notifyModelCatalogCache(client);
+}
+
+/** Retire read eligibility while preserving the last accepted, scoped display snapshot. */
 export function invalidateModelCatalogCache(
   client: ModelCatalogClient,
   scope?: ModelCatalogReadScope & { sessionsOnly?: boolean },
 ): void {
-  if (!scope) {
-    modelCatalogCache.delete(client);
-    notifyModelCatalogCache(client);
-    return;
-  }
   const cache = modelCatalogCache.get(client);
   if (!cache) {
     return;
   }
   const matches = (readScope: ModelCatalogReadScope | undefined) =>
+    !scope ||
     !readScope ||
     ((!scope.sessionsOnly || readScope.sessionKey !== undefined) &&
       (scope.agentId === undefined ||
@@ -212,10 +226,11 @@ export function invalidateModelCatalogCache(
       cache.reads.delete(read);
     }
   }
-  for (const [key, entry] of cache.entries) {
+  for (const entry of cache.entries.values()) {
     if (matches(entry.scope)) {
-      cache.entries.delete(key);
+      invalidateModelCatalogEntry(entry);
     }
   }
+  trimModelCatalogCache(cache);
   notifyModelCatalogCache(client);
 }

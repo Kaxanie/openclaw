@@ -98,10 +98,7 @@ export function createCatalogDiscoveryController(
         if (data) {
           options.setData({
             ...data,
-            models: result.models,
-            automaticUtilityModel: result.defaultModels?.automaticUtilityModel,
             providerOutcomes: result.providerOutcomes ?? [],
-            pendingProviders: result.pendingProviders,
             catalogError: null,
           });
         }

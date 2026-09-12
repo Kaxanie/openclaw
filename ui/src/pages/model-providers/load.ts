@@ -3,11 +3,7 @@
 // the provider list.
 import type { SessionModelUsage } from "../../../../src/infra/session-cost-usage.types.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import type {
-  ModelAuthStatusResult,
-  ModelCatalogEntry,
-  ModelCatalogProviderOutcome,
-} from "../../api/types.ts";
+import type { ModelAuthStatusResult, ModelCatalogProviderOutcome } from "../../api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import { formatUiError } from "../../lib/format-error.ts";
@@ -30,10 +26,8 @@ export const MODEL_PROVIDERS_COST_DAYS = 30;
 
 export type ModelProvidersData = {
   authStatus: ModelAuthStatusResult | null;
-  models: ModelCatalogEntry[] | null;
-  automaticUtilityModel: string | null | undefined;
+  /** Operation diagnostics; picker facts are owned by the shared catalog store. */
   providerOutcomes: ModelCatalogProviderOutcome[];
-  pendingProviders?: readonly string[];
   catalogError: string | null;
   providerUsage: ProviderUsageRequestResult | null;
   costByProvider: SessionModelUsage[] | null;
@@ -45,8 +39,6 @@ type RequestResult<T> = { ok: true; result: T } | { ok: false; error: unknown };
 
 export const EMPTY_MODEL_PROVIDERS_DATA: ModelProvidersData = {
   authStatus: null,
-  models: null,
-  automaticUtilityModel: undefined,
   providerOutcomes: [],
   catalogError: null,
   providerUsage: null,
@@ -105,12 +97,7 @@ export async function loadModelProvidersData(
   return {
     authStatus:
       authStatus.ok && Array.isArray(authStatus.result?.providers) ? authStatus.result : null,
-    models: catalog.ok ? catalog.result.models : null,
-    automaticUtilityModel: catalog.ok
-      ? catalog.result.defaultModels?.automaticUtilityModel
-      : undefined,
     providerOutcomes: catalog.ok ? (catalog.result.providerOutcomes ?? []) : [],
-    pendingProviders: catalog.ok ? catalog.result.pendingProviders : undefined,
     catalogError:
       refreshResult && !refreshResult.ok
         ? errorMessage(refreshResult.error)

@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { GatewayPendingRequests } from "../../../../packages/gateway-client/src/pending-request.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import { peekModelCatalog } from "../../lib/model-catalog-store.ts";
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { loadModelProviderCost, loadModelProvidersData, loadModelProviderUsage } from "./load.ts";
 
 describe("loadModelProvidersData", () => {
   it.each([false, true])(
-    "reports an internal catalog failure without discarding its result (retained rows: %s)",
+    "reports an internal catalog failure without publishing failed rows (returned rows: %s)",
     async (hasRows) => {
       const models = hasRows ? [{ provider: "fixture", id: "retained", name: "Retained" }] : [];
       const client = createTestGatewayClient(async (method) => {
@@ -17,7 +18,7 @@ describe("loadModelProvidersData", () => {
         return method === "models.authStatus" ? { ts: 1, providers: [] } : {};
       });
       const result = await loadModelProvidersData(client, { agentId: "main" });
-      expect(result.models).toEqual(models);
+      expect(peekModelCatalog(client, { agentId: "main" })).toBeUndefined();
       expect(result.catalogError).toBe("More models could not be discovered.");
       expect(result.error).toBeNull();
     },
@@ -56,7 +57,9 @@ describe("loadModelProvidersData", () => {
       }
       const result = await loading;
 
-      expect(result.models).toEqual([{ id: "published", name: "Published", provider: "ollama" }]);
+      expect(peekModelCatalog(client, { agentId: "writer" })?.models).toEqual([
+        { id: "published", name: "Published", provider: "ollama" },
+      ]);
       expect(result.catalogError).toBeNull();
       expect(result.error).toBe(authFails ? "Authentication status unavailable" : null);
     },
@@ -104,7 +107,8 @@ describe("loadModelProvidersData", () => {
     const result = await loadModelProvidersData(client, { agentId: "main", refresh: true });
 
     expect(result.providerOutcomes).toEqual([{ provider: "ollama", status: "unavailable" }]);
-    expect(result.models).toContainEqual(expect.objectContaining({ id: "retained" }));
+    expect(result.catalogError).toBe("More models could not be discovered.");
+    expect(peekModelCatalog(client, { agentId: "main" })).toBeUndefined();
     expect(result.error).toBeNull();
   });
 
@@ -225,7 +229,7 @@ describe("loadModelProvidersData", () => {
 
     const result = await loadModelProvidersData(client, { agentId: "main", refresh });
 
-    expect(result.models).toBeNull();
+    expect(peekModelCatalog(client, { agentId: "main" })).toBeUndefined();
     expect(result.catalogError).toBe(
       "configured catalog unavailable: OPENAI_API_KEY=sk-123...cdef",
     );
@@ -249,13 +253,14 @@ describe("loadModelProvidersData", () => {
       }
     });
 
-    const result = await loadModelProvidersData({ request } as unknown as GatewayBrowserClient, {
+    const client = createTestGatewayClient(request);
+    const result = await loadModelProvidersData(client, {
       agentId: "main",
     });
 
     expect(result.error).toBe(unavailable.message);
     expect(result.authStatus).toMatchObject({ unavailable });
-    expect(result.models).toEqual([
+    expect(peekModelCatalog(client, { agentId: "main" })?.models).toEqual([
       { id: "configured", name: "Configured", provider: "test-provider" },
     ]);
   });
@@ -280,7 +285,7 @@ describe("loadModelProvidersData", () => {
     const result = await loadModelProvidersData(client, { agentId: "main" });
 
     expect(result.authStatus).toBeNull();
-    expect(result.models).toEqual([]);
+    expect(peekModelCatalog(client, { agentId: "main" })?.models).toEqual([]);
     expect(result.providerOutcomes).toEqual([]);
     expect(result.catalogError).toBeNull();
     expect(result.providerUsage).toBeNull();
@@ -421,7 +426,9 @@ describe("loadModelProvidersData", () => {
     const result = await loadModelProvidersData(client, { refresh: true, agentId: "writer" });
 
     expect(result.catalogError).toBe("catalog refresh failed: OPENAI_API_KEY=sk-123...cdef");
-    expect(result.models).toEqual([{ id: "cached", name: "Cached", provider: "openai" }]);
+    expect(peekModelCatalog(client, { agentId: "writer" })?.models).toEqual([
+      { id: "cached", name: "Cached", provider: "openai" },
+    ]);
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual([
       ["models.list", { view: "configured", agentId: "writer", refresh: true }],
       ["models.list", { view: "configured", agentId: "writer" }],
