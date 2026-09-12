@@ -78,7 +78,7 @@ const btrfsBackend: WorktreeFilesystemBackend = {
   },
 };
 
-async function cloneApfsDirectory(
+async function cloneDirectory(
   source: string,
   destination: string,
   options: WorktreeFilesystemOptions,
@@ -95,7 +95,7 @@ async function cloneApfsDirectory(
     const sourcePath = path.join(source, entry.name);
     const destinationPath = path.join(destination, entry.name);
     if (entry.isDirectory()) {
-      await cloneApfsDirectory(sourcePath, destinationPath, options, cloneFile);
+      await cloneDirectory(sourcePath, destinationPath, options, cloneFile);
     } else {
       assertActive(options);
       cloneFile(sourcePath, destinationPath);
@@ -115,6 +115,26 @@ export async function detectWorktreeFilesystemBackend(
   options: WorktreeFilesystemOptions,
 ): Promise<WorktreeFilesystemBackend | null> {
   assertActive(options);
+  if (process.platform === "win32") {
+    const { refsFilesystem } = await import("./filesystem-refs.native.js");
+    assertActive(options);
+    const volume = refsFilesystem.probe(parentPath);
+    if (!volume) {
+      return null;
+    }
+    return {
+      id: "refs",
+      async createTemplate(destination, templateOptions) {
+        assertActive(templateOptions);
+        await fs.mkdir(destination);
+      },
+      async cloneTemplate(source, destination, cloneOptions) {
+        await cloneDirectory(source, destination, cloneOptions, (from, to) =>
+          refsFilesystem.cloneFile(from, to, volume.clusterSize),
+        );
+      },
+    };
+  }
   if (process.platform === "darwin") {
     const { apfsFilesystem } = await import("./filesystem-apfs.native.js");
     const volume = await fs.statfs(parentPath);
@@ -129,7 +149,7 @@ export async function detectWorktreeFilesystemBackend(
         await fs.mkdir(destination);
       },
       async cloneTemplate(source, destination, cloneOptions) {
-        await cloneApfsDirectory(source, destination, cloneOptions, apfsFilesystem.cloneFile);
+        await cloneDirectory(source, destination, cloneOptions, apfsFilesystem.cloneFile);
       },
     };
   }
