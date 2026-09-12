@@ -21,7 +21,10 @@ import { resolveLeastPrivilegeOperatorScopesForMethod } from "./method-scopes.js
 import { createGatewayMethodRegistry } from "./methods/registry.js";
 import { createGatewayInstanceRuntime } from "./server-instance-runtime.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./server-methods/types.js";
-import { withOperatorToolGatewayAuthority } from "./server-plugin-in-process-dispatch.js";
+import {
+  getInProcessGatewayRequestContext,
+  withOperatorToolGatewayAuthority,
+} from "./server-plugin-in-process-dispatch.js";
 
 const socketCall = vi.spyOn(gatewayCall, "callGateway");
 afterAll(() => socketCall.mockRestore());
@@ -116,7 +119,7 @@ describe("hosted lifecycle Gateway dispatch", () => {
     const cleanup = () =>
       deleteSubagentSessionForCleanup({
         callGateway: subagentRegistryDeps.callGateway,
-        resolveGatewayContext,
+        gatewayBinding: { resolveGatewayContext },
         childSessionKey: "agent:main:subagent:child",
         expectedSessionId: "child-session",
         expectedLifecycleRevision: "child-revision",
@@ -131,6 +134,31 @@ describe("hosted lifecycle Gateway dispatch", () => {
     expect(deletions).toHaveLength(2);
     expect(socketCall).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    "keeps omitted and explicitly unbound cleanup owners distinct: %s",
+    async (unbound) => {
+      const ambient = createContext({});
+      const resolveAmbient = () => ambient;
+      const callGateway = vi.fn(async () => {
+        expect(getInProcessGatewayRequestContext()).toBe(unbound ? undefined : ambient);
+        return {};
+      });
+      await withPluginRuntimeGatewayContextResolver(resolveAmbient, () =>
+        expect(
+          deleteSubagentSessionForCleanup({
+            callGateway,
+            ...(unbound ? { gatewayBinding: { resolveGatewayContext: undefined } } : {}),
+            childSessionKey: "agent:main:subagent:child",
+            expectedSessionId: "child-session",
+            expectedLifecycleRevision: "child-revision",
+          }),
+        ).resolves.toBe("deleted"),
+      );
+      expect(callGateway).toHaveBeenCalledOnce();
+      expect(socketCall).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps transferred cleanup independent of expired tool authority and checks its owner before commit", async () => {
     const beforeCommit = createDeferredCore();
@@ -149,7 +177,7 @@ describe("hosted lifecycle Gateway dispatch", () => {
     const cleanup = () =>
       deleteSubagentSessionForCleanup({
         callGateway: subagentRegistryDeps.callGateway,
-        resolveGatewayContext: () => context,
+        gatewayBinding: { resolveGatewayContext: () => context },
         childSessionKey: "agent:main:subagent:child",
         expectedSessionId: "child-session",
         expectedLifecycleRevision: "child-revision",

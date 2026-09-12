@@ -202,7 +202,7 @@ export function createSubagentRegistrySweeper(params: {
     let failure: unknown;
     const outcome = await deleteSubagentSessionForCleanup({
       callGateway: params.callGateway,
-      resolveGatewayContext: getGatewayContextResolver(entry),
+      gatewayBinding: { resolveGatewayContext: getGatewayContextResolver(entry) },
       isCurrent: () => runs.get(entry.runId) === entry,
       childSessionKey: entry.childSessionKey,
       expectedSessionId: identity.sessionId,
