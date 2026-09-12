@@ -163,7 +163,7 @@ never needs the agent.
 
 Ask your agent:
 
-> Put https://status.example.com on this dashboard, expand it to fill the task,
+> Put <https://status.example.com> on this dashboard, expand it to fill the task,
 > and pin this session in the sidebar as Status.
 
 The built-in **Website** widget loads the live site directly in your browser.
