@@ -592,16 +592,35 @@ function getSecretCaptureStart(
   );
 }
 
-function redactMatch(
+type RedactionTarget = { start: number; end: number; value: string };
+type RedactionEdit = { start: number; end: number; replacement: string };
+
+function getRedactionEdit(
   { match, groups, input, offset }: RedactMatch,
   pattern: ResolvedRedactPattern,
   preserveSourceAssignment?: (text: string, offset: number) => boolean,
-): string {
+  project?: (start: number, end: number) => RedactionTarget | undefined,
+): RedactionEdit | undefined {
   if (match.includes("PRIVATE KEY-----")) {
-    return redactPemBlock(match, "…redacted…");
+    const target = project
+      ? project(offset, offset + match.length)
+      : { start: offset, end: offset + match.length, value: match };
+    return target && { ...target, replacement: redactPemBlock(target.value, "…redacted…") };
   }
   const selected = selectSecretCapture(match, groups);
-  const token = selected.value;
+  const tokenIndex =
+    selected.value === match ? 0 : getSecretCaptureStart(pattern, input, match, offset, selected);
+  if (tokenIndex < 0) {
+    return undefined;
+  }
+  const start = offset + tokenIndex;
+  const target = project
+    ? project(start, start + selected.value.length)
+    : { start, end: start + selected.value.length, value: selected.value };
+  if (!target) {
+    return undefined;
+  }
+  const token = target.value;
   if (
     sourceAssignmentPatterns.has(pattern) &&
     preserveSourceAssignment?.(
@@ -609,7 +628,7 @@ function redactMatch(
       offset + getSecretCaptureStart(pattern, input, match, offset, selected),
     )
   ) {
-    return match;
+    return undefined;
   }
   const formAwareValue = formAwareEqualsAssignmentPatterns.has(pattern)
     ? splitFormAwareCredentialValue(token)
@@ -617,7 +636,7 @@ function redactMatch(
   // An earlier pass (form-body or quoted-assignment masking) may already have replaced this
   // value with ***; re-masking would strip its quote wrapper around the placeholder.
   if (splitSecretValueForMask(formAwareValue.secret).maskable === "***") {
-    return match;
+    return undefined;
   }
   const isShellReferencePattern = shellReferencePreservingPatterns.has(pattern);
   // Preserve shell variable references (e.g. `MY_TOKEN=$MY_TOKEN`) for assignment patterns
@@ -628,7 +647,7 @@ function redactMatch(
     (shouldPreserveShellReferenceMatch(match, token) ||
       isEmptyOrMaskedShellParameterExpansionTail(token))
   ) {
-    return match;
+    return undefined;
   }
   // Assignment values can legitimately include trailing shell/structural characters
   // (e.g. `${VAR:-default}`); mask the captured token whole so those characters count toward the
@@ -641,14 +660,20 @@ function redactMatch(
       : isShellReferencePattern
         ? maskToken(token)
         : `${maskSecretValue(formAwareValue.secret, { hinted: true })}${formAwareValue.suffix}`;
-  if (token === match) {
-    return masked;
-  }
-  const tokenIndex = getSecretCaptureStart(pattern, input, match, offset, selected);
-  if (tokenIndex < 0) {
-    return match;
-  }
-  return `${match.slice(0, tokenIndex)}${masked}${match.slice(tokenIndex + token.length)}`;
+  return { start: target.start, end: target.end, replacement: masked };
+}
+
+function redactMatch(
+  match: RedactMatch,
+  pattern: ResolvedRedactPattern,
+  preserveSourceAssignment?: (text: string, offset: number) => boolean,
+): string {
+  const edit = getRedactionEdit(match, pattern, preserveSourceAssignment);
+  return edit
+    ? match.match.slice(0, edit.start - match.offset) +
+        edit.replacement +
+        match.match.slice(edit.end - match.offset)
+    : match.match;
 }
 
 export function redactText(
@@ -656,6 +681,7 @@ export function redactText(
   patterns: ResolvedRedactPattern[],
   options?: {
     preserveSourceAssignment?: (text: string, offset: number) => boolean;
+    jsonFieldKey?: string;
   },
 ): string {
   let next = redactFormBody(
@@ -666,7 +692,10 @@ export function redactText(
     redactMatch(match, pattern, options?.preserveSourceAssignment);
   // Each replacement finishes synchronously before this invocation advances its pattern.
   for (pattern of patterns) {
-    next = replaceRedactPattern(next, pattern, replace);
+    next =
+      options?.jsonFieldKey === undefined
+        ? replaceRedactPattern(next, pattern, replace)
+        : replaceRedactPatternWithFieldContext(next, options.jsonFieldKey, pattern, replace);
   }
   return next;
 }
@@ -883,6 +912,77 @@ function isPublicShareIdPath(path: readonly string[]): boolean {
   return idKey === "id" && parentKey === "publicshare";
 }
 
+function replaceRedactPatternWithFieldContext(
+  value: string,
+  key: string,
+  pattern: ResolvedRedactPattern,
+  replace: (match: RedactMatch) => string,
+): string {
+  const prefix = `${JSON.stringify(key)}:`;
+  const field = prefix + JSON.stringify(value);
+  const matches = [...iterateRedactMatches(field, pattern)];
+  if (matches.length === 0) {
+    return replaceRedactPattern(value, pattern, replace);
+  }
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let offset = prefix.length + 1;
+  let plainOffset = 0;
+  // A capture touching any byte of a JSON escape covers the whole decoded character.
+  for (const character of value) {
+    const end = offset + JSON.stringify(character).length - 2;
+    for (let index = offset; index < end; index += 1) {
+      starts[index] = plainOffset;
+      ends[index] = plainOffset + character.length;
+    }
+    offset = end;
+    plainOffset += character.length;
+  }
+  const project = (from: number, to: number): RedactionTarget | undefined => {
+    const start = starts[Math.max(from, prefix.length + 1)];
+    const end = ends[Math.min(to, offset) - 1];
+    return start === undefined || end === undefined || end <= start
+      ? undefined
+      : { start, end, value: value.slice(start, end) };
+  };
+  const edits = matches.flatMap((match) => {
+    const edit = getRedactionEdit(match, pattern, undefined, project);
+    return edit ? [edit] : [];
+  });
+  if (edits.length === 0) {
+    return replaceRedactPattern(value, pattern, replace);
+  }
+  for (const match of iterateRedactMatches(value, pattern)) {
+    const edit = getRedactionEdit(match, pattern);
+    if (edit) {
+      edits.push(edit);
+    }
+  }
+  edits.sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: RedactionEdit[] = [];
+  for (const edit of edits) {
+    const previous = merged.at(-1);
+    if (!previous || edit.start >= previous.end) {
+      merged.push(edit);
+    } else if (
+      edit.start !== previous.start ||
+      edit.end !== previous.end ||
+      edit.replacement !== previous.replacement
+    ) {
+      previous.end = Math.max(previous.end, edit.end);
+      // Conflicting captures cannot retain a hint that exposes another captured value.
+      previous.replacement = "***";
+    }
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const edit of merged) {
+    parts.push(value.slice(cursor, edit.start), edit.replacement);
+    cursor = edit.end;
+  }
+  return parts.join("") + value.slice(cursor);
+}
+
 function redactSensitiveFieldValueWithOptions(
   key: string,
   value: string,
@@ -890,6 +990,7 @@ function redactSensitiveFieldValueWithOptions(
   path: readonly string[] = [key],
   objectPath = true,
   messagePart = false,
+  jsonField = false,
 ): string {
   if (isPublicShareIdPath(path)) {
     return maskToken(redactRegisteredSecretValues(value, maskToken));
@@ -914,10 +1015,12 @@ function redactSensitiveFieldValueWithOptions(
     masksWholeValue ? maskSecretFieldValue(key, value) : value,
     maskToken,
   );
+  const jsonFieldKey = jsonField && !masksWholeValue && !preservesReference ? key : undefined;
   const redacted =
+    jsonFieldKey !== undefined ||
     !usesBuiltInRedactPatterns(fieldOptions.patterns) ||
     couldMatchDefaultRedactPatterns(exactRedacted)
-      ? redactText(exactRedacted, resolved.patterns)
+      ? redactText(exactRedacted, resolved.patterns, { jsonFieldKey })
       : exactRedacted;
   return messagePart || redacted !== value || STRUCTURED_APP_PASSWORD_FIELD_RE.test(key)
     ? redactAppSpecificPasswords(redacted)
@@ -980,9 +1083,18 @@ function redactStructuredSecretValue(
   redactKeys = false,
   messageKeys?: ReadonlySet<string>,
   messagePart = false,
+  jsonField = false,
 ): unknown {
   if (typeof value === "string") {
-    return redactSensitiveFieldValueWithOptions(key, value, options, path, objectPath, messagePart);
+    return redactSensitiveFieldValueWithOptions(
+      key,
+      value,
+      options,
+      path,
+      objectPath,
+      messagePart,
+      jsonField,
+    );
   }
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
     return shouldRedactStructuredPrimitiveField(key, path) ? "***" : value;
@@ -1025,6 +1137,7 @@ function redactStructuredSecretValue(
               redactKeys,
               messageKeys,
               messagePart || (path.length === 0 && messageKeys?.has(name) === true),
+              redactKeys,
             ),
           ]),
         );

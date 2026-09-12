@@ -627,7 +627,7 @@ event payloads (tool start args, partial/final result payloads, derived
 exec output, and patch summaries):
 
 - Sensitive-value redaction is always enabled.
-- `logging.redactPatterns`: list of regex strings that replaces the default string list for log/transcript output. Built-in structural protections for secret-bearing log fields, form bodies, structured authorization headers, and bare AWS secret access keys always apply, including when this list is copied or customized. File and JSON console records apply these protections before JSON encoding. For Control UI tool payloads, custom patterns apply on top of the built-in defaults, so adding a pattern never weakens redaction of values already caught by the defaults.
+- `logging.redactPatterns`: list of regex strings that replaces the default string list for log/transcript output. Built-in structural protections for secret-bearing log fields, form bodies, structured authorization headers, and bare AWS secret access keys always apply, including when this list is copied or customized. File and JSON console records apply these protections before JSON encoding. Configured patterns also match each string field's serialized `"key":"value"` fragment, so JSON-context rules keep working; captured characters are masked in the field before encoding. For Control UI tool payloads, custom patterns apply on top of the built-in defaults, so adding a pattern never weakens redaction of values already caught by the defaults.
 
 File logs use JSONL; active session transcripts live in the
 [per-agent SQLite database](/reference/database-schemas#database-layout). Matching

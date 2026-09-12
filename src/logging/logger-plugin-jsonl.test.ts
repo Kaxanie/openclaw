@@ -85,9 +85,83 @@ const patternCases = [
   { name: "copied-defaults", custom: false, patterns: getDefaultRedactPatterns() },
 ];
 
+it.each([false, true])(
+  "Gateway plugin service preserves configured JSON-context captures (custom-only=%s)",
+  async (customOnly) => {
+    vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
+    vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
+    const file = paths.nextPath();
+    applyLoggingConfig({
+      level: "info",
+      file,
+      consoleStyle: "json",
+      consoleLevel: "info",
+      redactPatterns: [
+        ...(customOnly ? [] : getDefaultRedactPatterns()),
+        String.raw`/"account":"([^"]+)"/g`,
+        String.raw`/"customer":"(.+)"/g`,
+        String.raw`/"repeat":"repeat-(repeat)"/g`,
+        String.raw`/(?<="lookup":")[^"]+/g`,
+        String.raw`/"overlap":"(hidden[A-Z]{20})"|hidden/g`,
+        String.raw`/secret|[A-Z]{20}/g`,
+        "PLAIN_fixture_marker",
+      ],
+    });
+    const output = vi.fn();
+    loggingState.rawConsole = { log: output, info: output, warn: output, error: output };
+    const logger = createSubsystemLogger("context-record");
+    const { api, registry } = registerPlugin(logger, "context-record");
+    api.registerService({
+      id: "context-record",
+      start() {
+        logger.info("PLAIN_fixture_marker", {
+          scenario: "context",
+          account: "private-value",
+          customer: 'prefix"\\\n😺\ud800opaque-tail',
+          repeat: "repeat-repeat",
+          lookup: "opaque-value",
+          adjacent: "secretABCDEFGHIJKLMNOPQRST",
+          overlap: "hiddenABCDEFGHIJKLMNOPQRST",
+          nested: [{ account: "nested-secret" }, { account: ["array-visible"] }],
+        });
+      },
+    });
+    const services = await startPluginServices({ registry, config: {} });
+    await services.stop();
+    await flushLogger();
+    const records = fs
+      .readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const consoleRecords = output.mock.calls.map(([line]) => JSON.parse(String(line)));
+    const tail = (await readConfiguredLogTail()).lines.map((line) => JSON.parse(line));
+    expect(records).toHaveLength(1);
+    expect(consoleRecords).toHaveLength(1);
+    expect(tail).toHaveLength(1);
+    for (const [index, record] of [records[0][1], consoleRecords[0], tail[0][1]].entries()) {
+      expect(record).toMatchObject({
+        scenario: "context",
+        account: "***",
+        customer: index === 2 ? "***" : "prefix…tail",
+        repeat: "repeat-***",
+        lookup: "***",
+        adjacent: "***ABCDEF…QRST",
+        overlap: "***",
+        nested: [{ account: "***" }, { account: ["array-visible"] }],
+      });
+    }
+    expect(records[0].message).toBe("PLAIN_…rker");
+    expect(consoleRecords[0].message).toBe("PLAIN_…rker");
+    expect(JSON.stringify([records, consoleRecords, tail])).not.toContain("opaque-tail");
+  },
+);
+
 it.each(patternCases)(
   "Gateway plugin service logger preserves JSONL, credential headers, and pattern reload ($name)",
-  async ({ custom, patterns }) => {
+  async ({ name, custom, patterns }) => {
+    const maskedMessage =
+      name === "custom-only" ? '--token "synthe…3456"' : '--token ***synthe…3456"';
     vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
     vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
     const file = paths.nextPath();
@@ -150,15 +224,15 @@ it.each(patternCases)(
       .map((line) => JSON.parse(line));
     expect(records).toHaveLength(5);
     expect(records[0]).toMatchObject({
-      "1": '--token "synthe…3456"',
-      message: '--token "synthe…3456"',
+      "1": maskedMessage,
+      message: maskedMessage,
     });
     expect(records[1][1]).toEqual({
-      nested: [{ message: '--token "synthe…3456"', token: "***" }],
-      serialized: { message: '--token "synthe…3456"' },
+      nested: [{ message: maskedMessage, token: "***" }],
+      serialized: { message: maskedMessage },
       boxed: false,
-      callable: '--token "synthe…3456"',
-      accessor: { message: '--token "synthe…3456"' },
+      callable: maskedMessage,
+      accessor: { message: maskedMessage },
       omitted: {},
       unchanged: 42,
     });
@@ -170,7 +244,7 @@ it.each(patternCases)(
     expect(raw).not.toContain(token);
     expect(raw).not.toContain(keySecret);
     const consoleRecords = output.mock.calls.map(([line]) => JSON.parse(String(line)));
-    expect(consoleRecords[0].message).toBe('--token "synthe…3456"');
+    expect(consoleRecords[0].message).toBe(maskedMessage);
     expect(consoleRecords[1]).toMatchObject({
       token: "***",
       message: "abcd-e…mnop",
@@ -216,7 +290,7 @@ it("Gateway plugin service logger overflow marker preserves quoted hostname JSON
   expect(records).toHaveLength(2);
   expect(records[0]).toMatchObject({
     dropped: 1,
-    hostname: '--token "synthe…3456"',
+    hostname: '--token ***synthe…3456"',
     message: "[openclaw] file log queue overflow; dropped 1 oldest record",
   });
   expect(records[1].message).toBe("second");
@@ -224,7 +298,9 @@ it("Gateway plugin service logger overflow marker preserves quoted hostname JSON
 
 it.each(patternCases)(
   "Gateway plugin service masks complete long strings, secret fields, and derived messages ($name)",
-  async ({ patterns }) => {
+  async ({ name, patterns }) => {
+    const maskedMessage =
+      name === "custom-only" ? '--token "synthe…3456"' : '--token ***synthe…3456"';
     vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
     vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
     const file = paths.nextPath();
@@ -309,11 +385,11 @@ it.each(patternCases)(
     expect(consoleRecords[1]).toMatchObject(maskedFields);
     expect(conversions).toBe(1);
     expect(records[2].message).toBe(
-      `derived class ${JSON.stringify({ token: "OPAQUE…OKEN", text: '--token "synthe…3456"' })}`,
+      `derived class ${JSON.stringify({ token: "OPAQUE…OKEN", text: maskedMessage })}`,
     );
     expect(records[3].message).toBe('{"scenario":"first-class","note":"abcd-e…mnop"}');
     expect(consoleRecords[2].converted).toEqual({
-      text: '--token "synthe…3456"',
+      text: maskedMessage,
       token: "sk-abc…NDER",
     });
     const tail = await readConfiguredLogTail({ maxBytes: 500_000 });
