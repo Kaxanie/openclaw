@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { withEnv, withEnvAsync } from "../../test-utils/env.js";
+import { withEnvAsync } from "../../test-utils/env.js";
 import { bumpSkillsSnapshotVersion, getSkillsSnapshotVersion } from "../runtime/refresh-state.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../runtime/session-snapshot.js";
 import { writeSkill } from "../test-support/e2e-test-helpers.js";

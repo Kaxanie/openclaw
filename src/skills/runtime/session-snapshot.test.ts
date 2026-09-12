@@ -2,6 +2,7 @@ import path from "node:path";
 // Session snapshot tests cover runtime skill state captured for agent sessions.
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { PluginMetadataSnapshot } from "../../plugins/plugin-metadata-snapshot.types.js";
 import { WORKSPACE_SKILLS_PROMPT_FORMAT_VERSION } from "../types.js";
@@ -136,9 +137,9 @@ describe("resolveReusableWorkspaceSkillSnapshot", () => {
   });
 
   it("rebuilds for a live caller after an abandoned preparation drains", async () => {
-    const probe = Promise.withResolvers<void>();
-    const cancelled = Promise.withResolvers<void>();
-    const drain = Promise.withResolvers<void>();
+    const probe = createDeferred();
+    const cancelled = createDeferred();
+    const drain = createDeferred();
     const events: string[] = [];
     const controller = new AbortController();
     const reason = new Error("first preparation cancelled");
@@ -182,7 +183,7 @@ describe("resolveReusableWorkspaceSkillSnapshot", () => {
   });
 
   it("propagates a shared build failure to callers that remain current", async () => {
-    const build = Promise.withResolvers<SnapshotFixture>();
+    const build = createDeferred<SnapshotFixture>();
     const reason = new Error("skill source unavailable");
     buildWorkspaceSkillSnapshotMock.mockReturnValue(build.promise);
     const params = { workspaceDir: TEST_WORKSPACE_DIR, config: {}, watch: false };
@@ -204,12 +205,11 @@ describe("resolveReusableWorkspaceSkillSnapshot", () => {
       version += 1;
     });
     getSkillsSnapshotVersionMock.mockImplementation(() => version);
-    const firstBuild = Promise.withResolvers<void>();
-    const secondBuild = Promise.withResolvers<void>();
+    const firstBuild = createDeferred();
+    const secondBuild = createDeferred();
     const builds = [firstBuild, secondBuild];
-    let buildIndex = 0;
     buildWorkspaceSkillSnapshotMock.mockImplementation(async (_workspace, options) => {
-      await builds[buildIndex++]?.promise;
+      await builds.shift()?.promise;
       return {
         prompt: `snapshot version ${options.snapshotVersion}`,
         skills: [],

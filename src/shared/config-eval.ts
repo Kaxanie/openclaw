@@ -252,7 +252,10 @@ export async function prepareBinaryAvailability(
   };
   const worker = async () => {
     try {
-      while (!failure && isCurrent()) {
+      for (;;) {
+        if (failure || !isCurrent()) {
+          return;
+        }
         assertCurrent?.();
         const next = pending.next();
         if (next.done) {

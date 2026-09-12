@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { prepareEmbeddedSkills } from "../../agents/embedded-agent-runner/skill-runtime.js";
@@ -99,7 +100,7 @@ describe("asynchronous runtime skill preparation", () => {
         });
       if (warm) {
         await prepare();
-        sessionEntry = sessionStore[sessionKey];
+        sessionEntry = expectDefined(sessionStore[sessionKey], "prepared warm session entry");
       }
       const pending = prepare();
       const concurrent: SessionEntry = {
@@ -131,8 +132,13 @@ describe("asynchronous runtime skill preparation", () => {
   );
 
   it.each(
-    replyCases.flatMap((scenario) =>
-      (["replace", "delete", "rotate"] as const).map((action) => ({ ...scenario, action })),
+    replyCases.flatMap(({ isFirstTurnInSession, useHandle, warm }) =>
+      (["replace", "delete", "rotate"] as const).map((action) => ({
+        isFirstTurnInSession,
+        useHandle,
+        warm,
+        action,
+      })),
     ),
   )(
     "preserves reply generation after $action (first turn $isFirstTurnInSession, handle $useHandle, warm $warm)",
@@ -169,7 +175,7 @@ describe("asynchronous runtime skill preparation", () => {
         });
       if (warm) {
         await prepare();
-        sessionEntry = sessionStore[sessionKey];
+        sessionEntry = expectDefined(sessionStore[sessionKey], "prepared warm session entry");
       }
       const pending = prepare();
       if (action === "replace") {
@@ -232,7 +238,10 @@ describe("asynchronous runtime skill preparation", () => {
           cfg: params.config,
         });
       await prepare();
-      sessionEntry = sessionStore[scope.sessionKey];
+      sessionEntry = expectDefined(
+        sessionStore[scope.sessionKey],
+        "prepared durable warm session entry",
+      );
       if (action === "delete") {
         await applySessionEntryLifecycleMutation({
           agentId: scope.agentId,
