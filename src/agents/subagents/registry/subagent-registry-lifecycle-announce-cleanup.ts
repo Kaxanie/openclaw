@@ -475,6 +475,8 @@ export const startSubagentAnnounceCleanupFlow = (
             params.persist(runId);
             const sessionCleanup = await deleteSubagentSessionForCleanup({
               callGateway: params.callGateway,
+              resolveGatewayContext: getGatewayContextResolver(entry),
+              isCurrent: childSessionEffectsAllowed,
               childSessionKey: entry.childSessionKey,
               spawnMode: entry.spawnMode,
               expectedSessionId: cleanupSessionIdentity.sessionId,
