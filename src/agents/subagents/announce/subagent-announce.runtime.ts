@@ -17,7 +17,7 @@ export {
 export function readSubagentSessionEntry(storePath: string, sessionKey: string) {
   return loadSessionEntry({ storePath, sessionKey });
 }
-export const callGateway: typeof GatewayCaller = (request) =>
+export const callSubagentLifecycleGateway: typeof GatewayCaller = (request) =>
   bindGatewayLifecycleRequest()(request);
 export { readSessionMessagesAsync } from "../../../gateway/session-transcript-readers.js";
 export {

@@ -71,7 +71,7 @@ import {
   waitForSubagentRunOutcome,
 } from "./subagent-announce-output.js";
 import {
-  callGateway,
+  callSubagentLifecycleGateway,
   dispatchGatewayMethodInProcess,
   isEmbeddedAgentRunActive,
   getRuntimeConfig,
@@ -79,14 +79,14 @@ import {
 } from "./subagent-announce.runtime.js";
 
 type SubagentAnnounceDeps = {
-  callGateway: typeof callGateway;
+  callGateway: typeof callSubagentLifecycleGateway;
   dispatchGatewayMethodInProcess: typeof dispatchGatewayMethodInProcess;
   getRuntimeConfig: typeof getRuntimeConfig;
   loadSubagentRegistryRuntime: typeof loadSubagentRegistryRuntime;
 };
 
 const defaultSubagentAnnounceDeps: SubagentAnnounceDeps = {
-  callGateway,
+  callGateway: callSubagentLifecycleGateway,
   dispatchGatewayMethodInProcess,
   getRuntimeConfig,
   loadSubagentRegistryRuntime,
@@ -669,7 +669,7 @@ async function runSubagentAnnounceFlowBound(
 export const testing = {
   setDepsForTest(
     overrides?: Partial<SubagentAnnounceDeps> & {
-      callGateway?: typeof callGateway;
+      callGateway?: typeof callSubagentLifecycleGateway;
     },
   ) {
     const callGatewayOverride = overrides?.callGateway;
