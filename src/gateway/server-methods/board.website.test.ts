@@ -74,19 +74,33 @@ describe("website dashboard authoring", () => {
   });
 
   it.each([
-    {},
-    { url: "" },
-    { url: "/dashboard" },
-    { url: "//status.example" },
-    { url: "http://status.example" },
-    { url: "javascript:alert(1)" },
-    { url: "data:text/html,<script>alert(1)</script>" },
-    { url: "https://user:password@status.example" },
-    { url: "https://user@status.example" },
-    { url: `https://status.example/${"a".repeat(2048)}` },
-    { url: "https://status.example", html: "<script>alert(1)</script>" },
-    { url: "https://status.example", sandbox: "allow-top-navigation" },
-  ])("rejects invalid website props without changing a saved board: %j", async (props) => {
+    { name: "missing URL", props: {} },
+    { name: "empty URL", props: { url: "" } },
+    { name: "relative URL", props: { url: "/dashboard" } },
+    { name: "protocol-relative URL", props: { url: "//status.example" } },
+    { name: "HTTP URL", props: { url: "http://status.example" } },
+    { name: "script URL", props: { url: "javascript:alert(1)" } },
+    { name: "data URL", props: { url: "data:text/html,<script>alert(1)</script>" } },
+    ...[
+      { name: "userinfo", username: "example-user", password: "example-password" },
+      { name: "username-only", username: "example-user", password: "" },
+      { name: "password-only", username: "", password: "example-password" },
+    ].map(({ name, username, password }) => {
+      const url = new URL("https://status.example");
+      url.username = username;
+      url.password = password;
+      return { name, props: { url: url.href } };
+    }),
+    { name: "oversized URL", props: { url: `https://status.example/${"a".repeat(2048)}` } },
+    {
+      name: "extra HTML",
+      props: { url: "https://status.example", html: "<script>alert(1)</script>" },
+    },
+    {
+      name: "extra sandbox permissions",
+      props: { url: "https://status.example", sandbox: "allow-top-navigation" },
+    },
+  ])("rejects invalid website props without changing a saved board: $name", async ({ props }) => {
     const { tool, store, broadcast } = createWebsiteHarness();
     const widget = {
       action: "widget_put",

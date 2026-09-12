@@ -59,14 +59,24 @@ describe("website dashboard widget", () => {
     expect(element.querySelector("a")?.href).toBe(frame.src);
   });
 
-  it.each(["javascript:alert(1)", "data:text/html,hi", "https://user:secret@example.com"])(
-    "never loads an invalid saved website: %s",
-    async (url) => {
-      const element = await mount(url);
-      expect(element.querySelector('[role="alert"]')).not.toBeNull();
-      expect(element.querySelector("iframe,a")).toBeNull();
-    },
-  );
+  it.each([
+    { name: "script URL", url: "javascript:alert(1)" },
+    { name: "data URL", url: "data:text/html,hi" },
+    ...[
+      { name: "userinfo", username: "example-user", password: "example-password" },
+      { name: "username-only", username: "example-user", password: "" },
+      { name: "password-only", username: "", password: "example-password" },
+    ].map(({ name, username, password }) => {
+      const url = new URL("https://status.example");
+      url.username = username;
+      url.password = password;
+      return { name, url: url.href };
+    }),
+  ])("never loads an invalid saved website: $name", async ({ url }) => {
+    const element = await mount(url);
+    expect(element.querySelector('[role="alert"]')).not.toBeNull();
+    expect(element.querySelector("iframe,a")).toBeNull();
+  });
 
   it.each(["https://control.example/settings", "https://control.example:4444/settings"])(
     "keeps %s outside the website sandbox",
