@@ -55,7 +55,14 @@ describe("managed post-core root handoff", () => {
         const previous = path.join(project, ".pnpm", "openclaw@1.0.0", "node_modules", "openclaw");
         const current = path.join(project, ".pnpm", "openclaw@2.0.0", "node_modules", "openclaw");
         const inactive = path.join(project, ".pnpm", "openclaw@1.5.0", "node_modules", "openclaw");
-        const foreign = state.path("foreign-install");
+        const foreignProject = state.path("other-pnpm", "global", "5");
+        const foreign = path.join(
+          foreignProject,
+          ".pnpm",
+          "openclaw@2.0.0",
+          "node_modules",
+          "openclaw",
+        );
         for (const [root, version] of [
           [previous, "1.0.0"],
           [current, "2.0.0"],
@@ -65,21 +72,27 @@ describe("managed post-core root handoff", () => {
           await writePackageRoot(root, version);
         }
         const link = path.join(project, "node_modules", "openclaw");
-        await fs.mkdir(path.dirname(link), { recursive: true });
-        await fs.writeFile(
-          path.join(project, "node_modules", ".modules.yaml"),
-          "layoutVersion: 5\n",
-        );
-        await fs.writeFile(
-          path.join(project, "package.json"),
-          JSON.stringify({ dependencies: { openclaw: "2.0.0" } }),
-        );
-        await fs.symlink(current, link, process.platform === "win32" ? "junction" : "dir");
+        const foreignLink = path.join(foreignProject, "node_modules", "openclaw");
+        for (const [owner, target, activeLink] of [
+          [project, current, link],
+          [foreignProject, foreign, foreignLink],
+        ] as const) {
+          await fs.mkdir(path.dirname(activeLink), { recursive: true });
+          await fs.writeFile(
+            path.join(owner, "node_modules", ".modules.yaml"),
+            "layoutVersion: 5\n",
+          );
+          await fs.writeFile(
+            path.join(owner, "package.json"),
+            JSON.stringify({ dependencies: { openclaw: "2.0.0" } }),
+          );
+          await fs.symlink(target, activeLink, process.platform === "win32" ? "junction" : "dir");
+        }
         const meta = { root: previous, handoffId: "original-driver" };
         const metaPath = await state.writeJson("sentinel-meta.json", { version: 1, meta });
         mocks.root.mockResolvedValue(
           scenario === "foreign-install"
-            ? foreign
+            ? foreignLink
             : scenario === "inactive-generation"
               ? inactive
               : link,
