@@ -190,6 +190,11 @@ describe("managed handoff database publication", () => {
       const retained = dirs.make("retained-initialization-");
       const originalParent = fs.statSync(root);
       let originalFile: fs.Stats | undefined;
+      let identityDiagnostics: string | undefined;
+      const identity = (stat: fs.Stats | fs.BigIntStats) => ({
+        dev: String(stat.dev),
+        ino: String(stat.ino),
+      });
       vi.spyOn(fs, "fsyncSync").mockImplementationOnce((descriptor) => {
         originalFile = fs.fstatSync(descriptor);
         if (target === "file") {
@@ -204,6 +209,18 @@ describe("managed handoff database publication", () => {
           );
         }
         sync(descriptor);
+        identityDiagnostics = JSON.stringify({
+          node: process.version,
+          platform: process.platform,
+          target,
+          descriptorNumber: identity(fs.fstatSync(descriptor)),
+          descriptorBigInt: identity(fs.fstatSync(descriptor, { bigint: true })),
+          pathNumber: identity(fs.lstatSync(databasePath)),
+          pathBigInt: identity(fs.lstatSync(databasePath, { bigint: true })),
+        });
+        if (process.env.CI && target === "file") {
+          console.info(`Initialization identity: ${identityDiagnostics}`);
+        }
       });
       const initialize = () =>
         createManagedHandoffLeaseDatabase(databasePath)(true, () => undefined);
@@ -234,7 +251,14 @@ describe("managed handoff database publication", () => {
         });
         expect(readOwners()).toEqual(["recovered"]);
       } else {
-        expect(initialize).toThrow(/changed during initialization/);
+        try {
+          expect(initialize).toThrow(/changed during initialization/);
+        } catch (error) {
+          if (error instanceof Error) {
+            error.message += `\nInitialization identity: ${identityDiagnostics}`;
+          }
+          throw error;
+        }
         expect(fs.readFileSync(databasePath, "utf8")).toBe(target === "file" ? "replacement" : "");
         expect(fs.statSync(databasePath).nlink).toBe(1);
       }
