@@ -30,6 +30,7 @@ import type {
   OpenClawStateWorkerOperations,
   OpenClawStateWorkerInspectionOperations,
 } from "./openclaw-state-worker-contract.js";
+import { executeUserPreferenceCommand } from "./user-preferences.worker.js";
 
 export function createSqliteWorkerBackend(
   _input: undefined,
@@ -63,6 +64,12 @@ export function openExistingSqliteWorkerBackend(
           command.input.generation,
           readStableSqliteFileGeneration(context.databasePath),
         );
+      }
+      if (command.type === "userPreferences.read" || command.type === "userPreferences.write") {
+        return executeUserPreferenceCommand(command, {
+          path: context.databasePath,
+          env: getSqliteWorkerStateContext().environment,
+        });
       }
       const { db } = open();
       return runSqliteDeferredTransactionSync(db, () => {

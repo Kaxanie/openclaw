@@ -41,9 +41,10 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   getRuntimeConfig: vi.fn<() => OpenClawConfig>(),
-  getUserPreferences: vi.fn<() => Record<string, unknown>>(() => ({})),
+  getCanonicalUserPreferences: vi.fn<
+    () => Promise<{ profileId: string; entries: Record<string, unknown> } | undefined>
+  >(async () => undefined),
   readConfigFileSnapshot: vi.fn(),
-  resolveUserProfileId: vi.fn((profileId: string) => profileId),
   canonicalizeSpeechProviderId: vi.fn((providerId: string | undefined) => providerId),
   getSpeechProvider: vi.fn(),
   listSpeechProviders: vi.fn(() => []),
@@ -126,12 +127,7 @@ vi.mock("../../config/config.js", () => ({
 
 vi.mock("../../state/user-preferences.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/user-preferences.js")>()),
-  getUserPreferences: mocks.getUserPreferences,
-}));
-
-vi.mock("../../state/user-profiles.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../state/user-profiles.js")>()),
-  resolveUserProfileId: mocks.resolveUserProfileId,
+  getCanonicalUserPreferences: mocks.getCanonicalUserPreferences,
 }));
 
 vi.mock("../../tts/provider-registry.js", () => ({
@@ -1309,8 +1305,8 @@ describe("talk.config handler", () => {
     markTalkOwnerCold("tts");
     const runtimeConfig = createTalkConfig("healthy-talk-key");
     mocks.getSpeechProvider.mockReturnValue({ id: "acme" });
-    mocks.getUserPreferences.mockReturnValue(
-      profileAccent === undefined ? {} : { "ui.accent": profileAccent },
+    mocks.getCanonicalUserPreferences.mockResolvedValue(
+      profileId ? { profileId, entries: { "ui.accent": profileAccent } } : undefined,
     );
     mocks.readConfigFileSnapshot.mockResolvedValue({
       config: { ...runtimeConfig, ui: { seamColor: "#123456", prefs: { accent: "#52c99a" } } },
@@ -1330,9 +1326,9 @@ describe("talk.config handler", () => {
     expect(respond.mock.calls[0]?.[0]).toBe(true);
     expect(respond.mock.calls[0]?.[1]?.config?.ui).toEqual({ seamColor: expectedAccent });
     if (profileId) {
-      expect(mocks.getUserPreferences).toHaveBeenCalledWith(profileId, ["ui.accent"]);
+      expect(mocks.getCanonicalUserPreferences).toHaveBeenCalledWith(profileId, ["ui.accent"]);
     } else {
-      expect(mocks.getUserPreferences).not.toHaveBeenCalled();
+      expect(mocks.getCanonicalUserPreferences).not.toHaveBeenCalled();
     }
   });
 
