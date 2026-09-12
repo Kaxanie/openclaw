@@ -281,7 +281,9 @@ describe("Doctor retired plugin install config", () => {
               { timeoutMs: 60_000 },
             );
       const output = `${result.stdout}\n${result.stderr}`;
-      if ("status" in result) expect(result.status, output).toBe(0);
+      if ("status" in result) {
+        expect(result.status, output).toBe(0);
+      }
       clearLoadInstalledPluginIndexInstallRecordsCache();
       if (invalid) {
         expect(fs.readFileSync(configPath, "utf8"), output).toBe(original);

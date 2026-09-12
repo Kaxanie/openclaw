@@ -18,13 +18,17 @@ import {
   validateConfigObjectWithPlugins,
 } from "../../../config/validation.js";
 import { withPluginMetadataSnapshotScope } from "../../../plugins/current-plugin-metadata-snapshot.js";
-import { withoutPluginInstallRecords } from "../../../plugins/installed-plugin-index-records.js";
+import {
+  loadInstalledPluginIndexInstallRecordsSync,
+  withoutPluginInstallRecords,
+} from "../../../plugins/installed-plugin-index-records.js";
 import type { PluginMetadataSnapshot } from "../../../plugins/plugin-metadata-snapshot.types.js";
 import { restoreDoctorConfigEnvRefs } from "./config-flow-steps.js";
 import { applyLegacyDoctorMigrations } from "./legacy-config-compat.js";
 import { findDoctorLegacyConfigIssues } from "./legacy-config-issues.js";
 import {
   assertShippedPluginInstallConfigImportCurrent,
+  importShippedPluginInstallConfigForDoctor,
   readShippedPluginInstallConfigImportRecords,
   type ShippedPluginInstallConfigImport,
 } from "./plugin-registry-migration.js";
@@ -156,6 +160,17 @@ export function planAutomaticConfigRepair(
   return planConfigRepair(snapshot, true, options?.installRecords);
 }
 
+/** Validate the prospective plugin contracts before their records become durable. */
+export async function importAutomaticConfigRepairInstallRecords(snapshot: ConfigFileSnapshot) {
+  return await importShippedPluginInstallConfigForDoctor(snapshot, {
+    validateRecords: (installRecords) => {
+      if (!planAutomaticConfigRepair(snapshot, { installRecords })) {
+        throw new Error("Config cannot be repaired safely with the current plugin inventory.");
+      }
+    },
+  });
+}
+
 /**
  * Pre-bootstrap selection must not open state while deciding whether startup is safe.
  * Full plugin-contract validation belongs to the admitted preflight's repair plan.
@@ -183,7 +198,7 @@ export function isStartupConfigRepairResult(
 }
 
 /** Commits a planned repair against the exact snapshot admitted by its caller. */
-export async function commitAutomaticConfigRepair(
+async function writeAutomaticConfigRepair(
   plan: AutomaticConfigRepairPlan,
   snapshot: ConfigFileSnapshot,
   options: {
@@ -217,5 +232,30 @@ export async function commitAutomaticConfigRepair(
       // Startup verification above uses the same writer topology preparation.
       persistCanonicalAgentRoster: true,
     },
+  });
+}
+
+/** Revalidate imported inventory under its owner lease before the guarded config write. */
+export async function commitAutomaticConfigRepair(
+  plan: AutomaticConfigRepairPlan,
+  snapshot: ConfigFileSnapshot,
+  pluginInstallConfigImport?: ShippedPluginInstallConfigImport,
+): Promise<void> {
+  if (!pluginInstallConfigImport) {
+    return await writeAutomaticConfigRepair(plan, snapshot);
+  }
+  const { withPluginLifecycleLease } = await import("../../../plugins/plugin-lifecycle-lease.js");
+  await withPluginLifecycleLease({}, async (lease) => {
+    // Cleanup since import wins: validate canonical records without replaying source JSON.
+    const currentPlan = planAutomaticConfigRepair(snapshot, {
+      installRecords: loadInstalledPluginIndexInstallRecordsSync(),
+    });
+    if (!currentPlan) {
+      throw new Error("Config cannot be repaired safely with the current plugin inventory.");
+    }
+    await writeAutomaticConfigRepair(currentPlan, snapshot, {
+      pluginInstallConfigImport,
+      assertCurrent: () => lease.assertOwned(),
+    });
   });
 }

@@ -1,16 +1,8 @@
 /** Config preflight for doctor: legacy config/state migration, recovery, and snapshot loading. */
 import { note } from "../../packages/terminal-core/src/note.js";
-import { formatCliCommand } from "../cli/command-format.js";
 import { cloneEnvWithPlatformSemantics } from "../config/env-vars.js";
 import { resolveFutureConfigActionBlock } from "../config/future-version-guard.js";
-import {
-  parseConfigJson5,
-  recoverConfigFromJsonRootSuffix,
-  recoverConfigFromLastKnownGood,
-} from "../config/io.js";
 import type { ConfigSnapshotReadMeasure } from "../config/io.js";
-import { logConfigWarningsOnce } from "../config/io.warnings.js";
-import { formatConfigIssueLines } from "../config/issue-format.js";
 import { resolveIsConfigReadOnly, resolveStateDir } from "../config/paths.js";
 import { inspectShippedPluginInstallConfigRecords } from "../config/plugin-install-config-migration.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
@@ -25,16 +17,18 @@ import type {
   MigrationMessages,
   PreparedPostSessionPluginMigration,
 } from "../infra/state-migrations.types.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
 import { loadInstalledPluginIndexInstallRecordsSync } from "../plugins/installed-plugin-index-records.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { assertOpenClawStateWriteAllowedAtPath } from "../state/openclaw-state-ownership.js";
-import { noteIncludeConfinementWarning } from "./doctor-config-analysis.js";
+import { noteDoctorConfigPreflightIssues } from "./doctor-config-analysis.js";
 import { resolveMigrationCheckpointIdentity } from "./doctor-config-preflight-checkpoint.js";
-import { maybeMigrateLegacyConfig } from "./doctor-config-preflight-legacy-config.js";
+import {
+  maybeMigrateLegacyConfig,
+  prepareDoctorConfigRecovery,
+} from "./doctor-config-preflight-legacy-config.js";
 import { measureDoctorConfigPreflightStep } from "./doctor-config-preflight-measure.js";
 import {
   needsRefreshedPluginIndexPersistence,
@@ -56,6 +50,7 @@ import { noteStaleUpdateRuns } from "./doctor-update-run.js";
 import type { CronCodexRuntimePolicyTarget } from "./doctor/cron/store-migration.js";
 import {
   commitAutomaticConfigRepair,
+  importAutomaticConfigRepairInstallRecords,
   planAutomaticConfigRepair,
 } from "./doctor/shared/automatic-startup-config-repair.js";
 import type { DoctorConfigPreflightResult } from "./doctor/shared/config-migration-result.js";
@@ -63,7 +58,6 @@ import { resolveStateMigrationConfigInput } from "./doctor/shared/legacy-config-
 import { createDoctorPluginMetadataSnapshotScope } from "./doctor/shared/plugin-metadata-snapshot-scope.js";
 import {
   assertShippedPluginInstallConfigImportCurrent,
-  importShippedPluginInstallConfigForDoctor,
   type ShippedPluginInstallConfigImport,
 } from "./doctor/shared/plugin-registry-migration.js";
 import { shouldSkipLegacyUpdateDoctorConfigWrite } from "./doctor/shared/update-phase.js";
@@ -71,8 +65,6 @@ import { shouldSkipLegacyUpdateDoctorConfigWrite } from "./doctor/shared/update-
 const loadState = createLazyRuntimeModule(() => import("../infra/state-migrations.state-dir.js"));
 
 const loadCronRepair = createLazyRuntimeModule(() => import("./doctor/cron/legacy-repair.js"));
-
-const configLog = createSubsystemLogger("config");
 
 /** Returns true during updater-managed config rewrites where plugin validation may be stale. */
 export function shouldSkipPluginValidationForDoctorConfigPreflight(
@@ -370,74 +362,19 @@ export async function runDoctorConfigPreflight(
       configSnapshotRead = await readConfigSnapshotForPreflight(!stateDirMigrations);
     }
 
+    const recovery = await prepareDoctorConfigRecovery({
+      enabled: options.repairPrefixedConfig === true && !skipLegacyParentConfigWrite,
+      snapshotRead: configSnapshotRead,
+      planRepair: planScopedConfigRepair,
+      readSnapshot: () => readConfigSnapshotForPreflight(false),
+    });
+    configSnapshotRead = recovery.snapshotRead;
     let snapshot = configSnapshotRead.snapshot;
-    let activeConfigRepair: ReturnType<typeof planAutomaticConfigRepair> = null;
-    if (
-      options.repairPrefixedConfig === true &&
-      !skipLegacyParentConfigWrite &&
-      snapshot.exists &&
-      !snapshot.valid
-    ) {
-      const pendingPluginInstallConfig =
-        inspectShippedPluginInstallConfigRecords(snapshot.sourceConfig).status !== "missing";
-      // Migrate readable active bytes before rollback; otherwise one retired key can discard
-      // newer valid settings that the canonical Doctor migration would preserve.
-      activeConfigRepair =
-        typeof snapshot.raw === "string" && parseConfigJson5(snapshot.raw).ok
-          ? planScopedConfigRepair(snapshot)
-          : null;
-      let configRepaired = false;
-      if (!activeConfigRepair && (await recoverConfigFromJsonRootSuffix(snapshot))) {
-        note("Removed non-JSON prefix from openclaw.json.", "Config");
-        configRepaired = true;
-      } else if (
-        !activeConfigRepair &&
-        // Config preparation imports these records; backup recovery would erase its source.
-        !pendingPluginInstallConfig &&
-        (await recoverConfigFromLastKnownGood({ snapshot, reason: "doctor-invalid-config" }))
-      ) {
-        note(
-          "Restored openclaw.json from last-known-good; original saved as .clobbered.*.",
-          "Config",
-        );
-        configRepaired = true;
-      }
-      if (configRepaired) {
-        configSnapshotRead = await readConfigSnapshotForPreflight(false);
-        snapshot = configSnapshotRead.snapshot;
-      }
-      if (
-        !snapshot.valid &&
-        typeof snapshot.raw === "string" &&
-        !parseConfigJson5(snapshot.raw).ok
-      ) {
-        throw new Error(
-          `Config at ${snapshot.path} is not parseable and cannot be repaired automatically. The file remains unchanged. Inspect the exact parse error with ${formatCliCommand("openclaw config validate")}, then hand-edit the file; or move it aside and run ${formatCliCommand("openclaw onboard")} to generate a fresh config.`,
-        );
-      }
-    }
-    const invalidConfigNote =
-      options.invalidConfigNote ?? "Config invalid; doctor will run with best-effort config.";
-    if (
-      invalidConfigNote &&
-      snapshot.exists &&
-      !snapshot.valid &&
-      !activeConfigRepair &&
-      snapshot.legacyIssues.length === 0
-    ) {
-      note(invalidConfigNote, "Config");
-      noteIncludeConfinementWarning(snapshot);
-    }
-
-    const warnings = snapshot.warnings ?? [];
-    if (warnings.length > 0) {
-      // Non-interactive Gateway stdout is a log stream; preserve its structured logging contract.
-      if (process.stdout.isTTY) {
-        note(formatConfigIssueLines(warnings, "-").join("\n"), "Config warnings");
-      } else {
-        logConfigWarningsOnce({ configPath: snapshot.path, warnings, logger: configLog });
-      }
-    }
+    const activeConfigRepair = recovery.activeConfigRepair;
+    noteDoctorConfigPreflightIssues(snapshot, {
+      invalidConfigNote: options.invalidConfigNote,
+      activeRepair: activeConfigRepair !== null,
+    });
 
     let baseConfig = snapshot.sourceConfig ?? snapshot.config ?? {};
     let automaticConfigRepair =
@@ -479,13 +416,7 @@ export async function runDoctorConfigPreflight(
       freshConfigGuardAllowed
     ) {
       startupMigrationLease?.heartbeat();
-      pluginInstallConfigImport = await importShippedPluginInstallConfigForDoctor(snapshot, {
-        validateRecords: (installRecords) => {
-          if (!planAutomaticConfigRepair(snapshot, { installRecords })) {
-            throw new Error("Config cannot be repaired safely with the current plugin inventory.");
-          }
-        },
-      });
+      pluginInstallConfigImport = await importAutomaticConfigRepairInstallRecords(snapshot);
       // Consumers must see the imported inventory before package or plugin state migrations.
       configSnapshotRead = await readConfigSnapshotForPreflight(false);
       snapshot = configSnapshotRead.snapshot;
@@ -722,28 +653,13 @@ export async function runDoctorConfigPreflight(
       modelBillingRouteMigrationSource ??=
         snapshot.sourceConfigBeforeMigrations ?? snapshot.sourceConfig;
       startupMigrationLease?.heartbeat();
-      await measurePreflightStep("automatic-config-repair", async () => {
-        if (!pluginInstallConfigImport) {
-          return await runWithPluginMetadataSnapshot({ config: automaticConfigRepair.config }, () =>
-            commitAutomaticConfigRepair(automaticConfigRepair, snapshot),
-          );
-        }
-        const { withPluginLifecycleLease } = await import("../plugins/plugin-lifecycle-lease.js");
-        await withPluginLifecycleLease({}, async (lease) => {
-          // Cleanup since import wins: validate canonical records without replaying source JSON.
-          const currentPlan = planAutomaticConfigRepair(snapshot, {
-            installRecords: loadInstalledPluginIndexInstallRecordsSync(),
-          });
-          if (!currentPlan) {
-            throw new Error("Config cannot be repaired safely with the current plugin inventory.");
-          }
-          lease.assertOwned();
-          await commitAutomaticConfigRepair(currentPlan, snapshot, {
-            pluginInstallConfigImport,
-            assertCurrent: lease.assertOwned,
-          });
-        });
-      });
+      await measurePreflightStep("automatic-config-repair", () =>
+        pluginInstallConfigImport
+          ? commitAutomaticConfigRepair(automaticConfigRepair, snapshot, pluginInstallConfigImport)
+          : runWithPluginMetadataSnapshot({ config: automaticConfigRepair.config }, () =>
+              commitAutomaticConfigRepair(automaticConfigRepair, snapshot),
+            ),
+      );
       note(
         `Migrated legacy config keys${gatewayStartupCheckpointRequired ? " at startup" : " in the active openclaw.json"}:\n${automaticConfigRepair.changes.map((entry) => `- ${entry}`).join("\n")}`,
         "Doctor changes",
