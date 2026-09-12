@@ -83,7 +83,7 @@ export const refsFilesystem = {
     }
     const volume = root.toString("utf16le").split("\0", 1)[0];
     const filesystem = Buffer.alloc(64);
-    const flags = [0];
+    const flags: [number] = [0];
     if (
       !getVolumeInformation(volume, null, 0, null, null, flags, filesystem, filesystem.length / 2)
     ) {
@@ -93,8 +93,8 @@ export const refsFilesystem = {
     if (filesystem.toString("utf16le").split("\0", 1)[0] !== "ReFS" || !(flags[0] & 0x08000000)) {
       return null;
     }
-    const sectors = [0];
-    const bytes = [0];
+    const sectors: [number] = [0];
+    const bytes: [number] = [0];
     if (!getDiskFreeSpace(volume, sectors, bytes, [0], [0])) {
       throw failure("GetDiskFreeSpaceW");
     }
