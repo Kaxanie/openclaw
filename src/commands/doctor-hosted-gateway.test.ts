@@ -189,7 +189,7 @@ describe("Doctor hosted Gateway reads", () => {
     const context = contextFor({ status: ({ respond }) => respond(true, status) });
     const contributions = resolveFinalDoctorHealthContributions({
       runSystemdLingerHealth: async () => {},
-      detectSystemdLingerFindings: () => [],
+      detectSystemdLingerFindings: async () => [],
       runShellCompletionHealth: async () => {},
       runGatewayHealthChecks: async () => {},
     });
