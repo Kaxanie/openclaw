@@ -72,7 +72,7 @@ it.each([
           catalog: { order: "profile", async run(ctx) {
             const auth = ctx.resolveProviderAuth(provider);
             if (!auth.discoveryApiKey) return null;
-            const { getCachedLiveCatalogValue } = await import("openclaw/plugin-sdk/provider-catalog-shared");
+            const { getCachedLiveCatalogValue } = require("openclaw/plugin-sdk/provider-catalog-shared");
             const rows = await getCachedLiveCatalogValue({
               keyParts: [${JSON.stringify(baseUrl)}, provider, auth.discoveryApiKey], ttlMs: 1,
               load: async () => {
