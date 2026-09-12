@@ -360,7 +360,8 @@ export function resolvePluginMetadataSnapshotCacheKey(
     index: params.index
       ? resolveInstalledManifestRegistryIndexFingerprint(params.index)
       : undefined,
-    preferPersisted: params.preferPersisted !== false,
+    installRecords: params.installRecords,
+    preferPersisted: params.installRecords === undefined && params.preferPersisted !== false,
   });
 }
 
@@ -372,6 +373,7 @@ export function loadPluginMetadataSnapshot(
   }
   if (
     params.allowCurrent !== false &&
+    params.installRecords === undefined &&
     params.stateDir === undefined &&
     params.preferPersisted !== false
   ) {
@@ -519,6 +521,7 @@ export function resolvePluginMetadataSnapshot(
 ): PluginMetadataSnapshot {
   const canUseCurrentSnapshot =
     params.allowCurrent !== false &&
+    params.installRecords === undefined &&
     params.stateDir === undefined &&
     params.preferPersisted !== false;
   if (canUseCurrentSnapshot) {
@@ -585,9 +588,14 @@ function loadPluginMetadataSnapshotImpl(
     workspaceDir: params.workspaceDir,
     ...(params.stateDir ? { stateDir: params.stateDir } : {}),
     env: params.env,
-    ...(params.preferPersisted !== undefined ? { preferPersisted: params.preferPersisted } : {}),
+    ...(params.installRecords !== undefined
+      ? { preferPersisted: false }
+      : params.preferPersisted !== undefined
+        ? { preferPersisted: params.preferPersisted }
+        : {}),
     ...(params.allowCurrent !== undefined ? { allowCurrent: params.allowCurrent } : {}),
     ...(params.index ? { index: params.index } : {}),
+    ...(params.installRecords ? { installRecords: params.installRecords } : {}),
   });
   const registrySnapshotMs = performance.now() - registryStartedAt;
   const index = structuredClone(registryResult.snapshot);
