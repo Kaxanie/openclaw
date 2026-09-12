@@ -170,7 +170,7 @@ export function createSessionReconciliation(host: Host) {
   const reconcile = (
     row: GatewaySessionRow | undefined,
     defaults?: SessionsListResult["defaults"],
-    options?: SessionReconcileOptions & { sourceCanonicalListRevision?: number },
+    options?: Parameters<SessionCapability["reconcile"]>[2],
     observation?: ReturnType<Host["roster"]["captureReconciliation"]>,
   ): boolean => {
     const state = host.readState();
@@ -203,7 +203,7 @@ export function createSessionReconciliation(host: Host) {
     ) {
       return false;
     }
-    const { sourceCanonicalListRevision, ...historyOptions } = options ?? {};
+    const { sourceCanonicalListRevision, sourceListScope, ...historyOptions } = options ?? {};
     const preserveCanonicalRow =
       !rowIsCurrent ||
       (!observation &&
@@ -261,7 +261,11 @@ export function createSessionReconciliation(host: Host) {
     }
     notify?.();
     if (row && rowIsCurrent && rowsChanged) {
-      host.roster.invalidateManagedLists(parseAgentSessionKey(row.key)?.agentId ?? historyAgentId);
+      host.roster.invalidateManagedLists(
+        parseAgentSessionKey(row.key)?.agentId ?? historyAgentId,
+        accepted || row,
+        sourceListScope,
+      );
     }
     return rowIsCurrent;
   };

@@ -1,5 +1,7 @@
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../api/types.ts";
+import { formatUiError } from "../lib/format-error.ts";
+import { fetchChildSessionRows } from "../lib/sessions/child-session-data.ts";
 import type { SessionCapability } from "../lib/sessions/index.ts";
 import { preserveRosterPresentationMetadata } from "../lib/sessions/reconcile.ts";
 import {
@@ -11,7 +13,7 @@ import {
   resolveUiSessionNavigationParentKey,
 } from "../lib/sessions/session-key.ts";
 import { matchesExistingSession } from "../lib/sessions/session-row-reconcile.ts";
-export { fetchChildSessionRows } from "../lib/sessions/child-session-data.ts";
+import type { SessionLineageController } from "./session-lineage-controller.ts";
 
 const MAX_SESSION_LINEAGE_DEPTH = 16;
 
@@ -181,7 +183,7 @@ function preserveActiveSessionLineageRows(
   return preserved;
 }
 
-export function mergeRefreshedChildSessionRows(
+function mergeRefreshedChildSessionRows(
   sessionKey: string | null,
   rowsByParent: Readonly<Record<string, readonly GatewaySessionRow[]>>,
   parentKey: string,
@@ -192,6 +194,66 @@ export function mergeRefreshedChildSessionRows(
     ...rowsByParent,
     ...mergeChildSessionRows({ [parentKey]: rows }, { [parentKey]: lineage }),
   };
+}
+
+/** Publish an observed child window through the sidebar's existing lineage admission. */
+export async function hydrateSidebarChildSessions(params: {
+  owner: {
+    childSessionRowsByParent: Readonly<Record<string, readonly GatewaySessionRow[]>>;
+    loadedChildSessionKeys: ReadonlySet<string>;
+    childSessionErrorsByParent: ReadonlyMap<string, string>;
+  };
+  parentKey: string;
+  sessions: SessionCapability;
+  initialResult: SessionsListResult;
+  childRead: ReturnType<SessionLineageController["captureChildRead"]>;
+  ownsQuery: () => boolean;
+  selectedKey: () => string | null;
+  finish: () => void;
+}): Promise<void> {
+  const { owner, parentKey, sessions, initialResult, childRead } = params;
+  const isCurrent = () => params.ownsQuery() && childRead.isCurrent();
+  try {
+    const rows = await fetchChildSessionRows({ sessions, parentKey, isCurrent, initialResult });
+    if (!rows || !isCurrent()) {
+      return;
+    }
+    const accepted = rows.flatMap((row) => {
+      const outcome = childRead.reconcile(row);
+      return outcome.status === "selected" ? (outcome.row ? [outcome.row] : []) : [row];
+    });
+    if (!isCurrent()) {
+      return;
+    }
+    // Removed children leave the window; only the routed lineage survives omission.
+    owner.childSessionRowsByParent = mergeRefreshedChildSessionRows(
+      params.selectedKey(),
+      owner.childSessionRowsByParent,
+      parentKey,
+      sessions.projectRows(accepted),
+    );
+    owner.loadedChildSessionKeys = new Set([...owner.loadedChildSessionKeys, parentKey]);
+    const errors = new Map(owner.childSessionErrorsByParent);
+    errors.delete(parentKey);
+    owner.childSessionErrorsByParent = errors;
+  } catch (error) {
+    if (!isCurrent()) {
+      return;
+    }
+    // Keep the expanded row stable and stop render-driven retries until explicit recovery.
+    owner.childSessionRowsByParent = {
+      ...owner.childSessionRowsByParent,
+      [parentKey]: owner.childSessionRowsByParent[parentKey] ?? [],
+    };
+    owner.childSessionErrorsByParent = new Map(owner.childSessionErrorsByParent).set(
+      parentKey,
+      formatUiError(error),
+    );
+  } finally {
+    if (isCurrent()) {
+      params.finish();
+    }
+  }
 }
 
 export function retireStaleChildSessionRows(

@@ -7,6 +7,7 @@ import type {
   SessionRowObservation,
   SessionRowTarget,
 } from "../lib/sessions/index.ts";
+import type { SessionListScope } from "../lib/sessions/session-capability.ts";
 import {
   areUiSessionKeysEquivalent,
   isUiGlobalSessionKey,
@@ -305,7 +306,7 @@ export class SessionLineageController {
     }
   }
 
-  captureChildRead(): {
+  captureChildRead(sourceListScope?: SessionListScope): {
     isCurrent: () => boolean;
     reconcile: (row: GatewaySessionRow) => ChildRowAdmission;
   } {
@@ -319,7 +320,10 @@ export class SessionLineageController {
     const global = navigation?.identity.sessionKey === "global";
     const binding = global ? this.binding : null;
     const observed = binding?.observation?.captureReconcile();
-    const reconcile = !global ? sessions?.captureReconcile() : undefined;
+    const read = !global ? sessions?.captureReconcile() : undefined;
+    const reconcile: SessionCapability["reconcile"] | undefined = read
+      ? (row, defaults, options) => read(row, defaults, { ...options, sourceListScope })
+      : undefined;
     const isCurrent = () =>
       this.owner.isSessionDataHostConnected &&
       sessions === this.owner.context?.sessions &&

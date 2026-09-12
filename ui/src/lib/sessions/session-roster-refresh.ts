@@ -162,10 +162,25 @@ export function createSessionRosterRefresh(host: SessionRosterRefreshHost) {
     };
   };
 
-  const invalidateManagedLists = (agentId?: string | null) => {
+  const invalidateManagedLists = (
+    agentId?: string | null,
+    row?: GatewaySessionRow,
+    sourceListScope?: SessionListScope,
+  ) => {
     const matchesAgent = sessionListAgentMatcher(agentId);
+    const matchesRow = row
+      ? sessionListEventMatcher({ key: row.key, agentId, session: row })
+      : undefined;
+    const sourceKey = sourceListScope
+      ? JSON.stringify(normalizeManagedSessionListQuery(sourceListScope))
+      : undefined;
     for (const entry of managedLists.values()) {
-      if (matchesAgent(sessionListQueryAgentId(entry.query))) {
+      // Adopting a query's accepted row into the primary roster cannot make
+      // that supplying query stale. Other membership projections still refresh.
+      if (entry.key === sourceKey) {
+        continue;
+      }
+      if (matchesRow ? matchesRow(entry) : matchesAgent(sessionListQueryAgentId(entry.query))) {
         entry.coordinator.schedule();
       }
     }

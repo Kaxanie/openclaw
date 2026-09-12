@@ -136,6 +136,7 @@ export function createSessionRosterObservations(
     rows: readonly GatewaySessionRow[],
     agentId?: string | null,
     sourceAgentId?: string | null,
+    incomingRows?: ReadonlyMap<string, GatewaySessionRow>,
   ) => {
     if (!result || rows.length === 0) {
       return result;
@@ -145,7 +146,25 @@ export function createSessionRosterObservations(
     const sessions = result.sessions.map((current) => {
       const key = identity(current, agentId);
       const row = key ? offered.get(key) : undefined;
-      const next = row ? mergeRow(current, row, agentId) : current;
+      const incoming = key ? incomingRows?.get(key) : undefined;
+      // A held descriptor rejects older full rows before they can donate
+      // previously unseen presentation fields. List-to-list merges retain
+      // their independent field observations.
+      const rejectedRead =
+        incoming &&
+        row &&
+        (rowRevision(row) > rowRevision(incoming) ||
+          (typeof incoming.updatedAt === "number" &&
+            typeof row.updatedAt === "number" &&
+            incoming.updatedAt < row.updatedAt));
+      const held = rejectedRead ? (currentRow(row, sourceAgentId) ?? row) : undefined;
+      const next = held
+        ? held.key === current.key
+          ? held
+          : inheritRow({ ...held, key: current.key }, held)
+        : row
+          ? mergeRow(current, row, agentId)
+          : current;
       changed ||= next !== current;
       return next;
     });
@@ -569,6 +588,7 @@ export function createSessionRosterObservations(
       previousAgentId = agentId,
       primaryAgentId = host.readState().agentId,
     ) {
+      const incomingRows = indexRows(result?.sessions ?? [], agentId);
       let accepted = merge(
         merge(result, previous?.sessions ?? [], agentId, previousAgentId),
         primary?.sessions ?? [],
@@ -589,7 +609,7 @@ export function createSessionRosterObservations(
       for (const entry of registeredRows) {
         const row = registeredRow(entry);
         if (row) {
-          accepted = merge(accepted, [row], agentId, entry.target.agentId);
+          accepted = merge(accepted, [row], agentId, entry.target.agentId, incomingRows);
         }
       }
       return accepted;
