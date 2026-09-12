@@ -204,8 +204,9 @@ from custom HTML widgets and does not loosen their sandbox or network grants.
 
 ## What widgets are allowed to do
 
-A widget that only renders needs no approval — it appears instantly, exactly
-like inline chat widgets, and its network access is fully disabled.
+Custom HTML and registered-source widgets that only render need no approval —
+they appear instantly, exactly like inline chat widgets, and their network access
+is fully disabled.
 
 Widgets that want **reach** must declare it. An explicit [session permission mode](/gateway/permission-modes)
 decides what happens: **Full access** grants immediately; **Workspace** uses an
