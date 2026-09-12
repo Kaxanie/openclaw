@@ -260,7 +260,7 @@ export function noteImplicitFallbackClobberWarnings(cfg: OpenClawConfig): void {
 }
 
 /** Emits a config include warning when an include path escapes the config directory. */
-export function noteIncludeConfinementWarning(snapshot: {
+function noteIncludeConfinementWarning(snapshot: {
   path?: string | null;
   issues?: Array<{ message: string }>;
 }): void {
