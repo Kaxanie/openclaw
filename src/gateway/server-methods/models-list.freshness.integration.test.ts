@@ -6,9 +6,13 @@ import { withTestTimeout } from "../../../test/helpers/promise.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { disconnectGatewayClient, startGatewayWithClient } from "../test-helpers.e2e.js";
 
-it.each([false, true])(
-  "models.list renews expired inventory without waiting (failed sibling: %s)",
-  async (withSibling) => {
+it.each([
+  { withSibling: false, getterBacked: false },
+  { withSibling: true, getterBacked: false },
+  { withSibling: false, getterBacked: true },
+])(
+  "models.list renews accepted inventory (failed sibling: $withSibling, getter-backed: $getterBacked)",
+  async ({ withSibling, getterBacked }) => {
     const state = await createOpenClawTestState({
       label: "catalog-freshness",
       env: {
@@ -77,9 +81,18 @@ it.each([false, true])(
                 return response.json();
               },
             });
-            return { provider: { baseUrl: ${JSON.stringify(baseUrl)}, api: "openai-completions",
+            const accepted = { baseUrl: ${JSON.stringify(baseUrl)}, api: "openai-completions",
               models: rows.map(id => ({ id, name: id, reasoning: false, input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 4096 })) } };
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 4096 })) };
+            if (${getterBacked}) {
+              let evaluated = false;
+              return { get providers() {
+                if (evaluated) return { "unaccepted-projection": accepted };
+                evaluated = true;
+                return { [provider]: accepted };
+              } };
+            }
+            return { provider: accepted };
           } },
         });
       },

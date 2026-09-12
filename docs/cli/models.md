@@ -144,8 +144,8 @@ model-provider secrets for that request.
 
 When a provider's saved inventory expires, catalog reads return saved rows while
 the Gateway refreshes that provider in the background. A later read shows newly
-published models. Failed refreshes preserve saved rows and show a warning; use
-`--refresh` to retry.
+published models. Failed refreshes preserve saved rows; use `--refresh` to retry.
+Chat model menus and the Control UI display the catalog's refresh warning.
 
 A selected Gateway must advertise `published-model-catalog`. If it does not,
 update or restart it and retry. Connection, authorization and capability errors

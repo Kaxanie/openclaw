@@ -11,6 +11,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import { withProviderCatalogExpiry } from "../plugins/provider-catalog-expiry.js";
 import type { ProviderCatalogOutcome } from "../plugins/provider-catalog.types.js";
 import { isProviderCatalogSourceAllowed } from "../plugins/provider-config-owner.js";
 import {
@@ -303,37 +304,40 @@ async function resolvePluginImplicitProviders(
     // Static catalogs are preferred for entries-only discovery and as a fallback
     // when runtime discovery produces no usable provider config.
     const hasPreparedStaticResult = preparedStaticResults?.has(provider) === true;
-    let result;
-    if (useStaticCatalog) {
-      result = hasPreparedStaticResult
-        ? preparedStaticResults.get(provider)
-        : await runProviderStaticCatalog({ provider });
-    } else {
-      result = await runProviderCatalogWithTimeout({
-        provider,
-        authStore: ctx.authStore,
-        ...(providerIds !== undefined ? { providerIds } : {}),
-        config: catalogConfig,
-        agentDir: ctx.agentDir,
-        workspaceDir: ctx.workspaceDir,
-        env: ctx.env,
-        resolveProviderApiKey: resolveCatalogProviderApiKey,
-        resolveProviderAuth: (providerId, options) =>
-          ctx.resolveProviderAuth(providerId?.trim() || provider.id, options),
-        reportCatalogOutcome: ctx.onProviderCatalogOutcome,
-        timeoutMs: ctx.providerDiscoveryTimeoutMs ?? resolveLiveProviderCatalogTimeoutMs(ctx.env),
-      });
-    }
-    if (!result && !useStaticCatalog && provider.staticCatalog) {
-      result = await runProviderStaticCatalog({ provider });
-    }
-    if (!result) {
+    const normalizedResult = await withProviderCatalogExpiry(
+      async () => {
+        let result;
+        if (useStaticCatalog) {
+          result = hasPreparedStaticResult
+            ? preparedStaticResults.get(provider)
+            : await runProviderStaticCatalog({ provider });
+        } else {
+          result = await runProviderCatalogWithTimeout({
+            provider,
+            authStore: ctx.authStore,
+            ...(providerIds !== undefined ? { providerIds } : {}),
+            config: catalogConfig,
+            agentDir: ctx.agentDir,
+            workspaceDir: ctx.workspaceDir,
+            env: ctx.env,
+            resolveProviderApiKey: resolveCatalogProviderApiKey,
+            resolveProviderAuth: (providerId, options) =>
+              ctx.resolveProviderAuth(providerId?.trim() || provider.id, options),
+            reportCatalogOutcome: ctx.onProviderCatalogOutcome,
+            timeoutMs:
+              ctx.providerDiscoveryTimeoutMs ?? resolveLiveProviderCatalogTimeoutMs(ctx.env),
+          });
+        }
+        if (!result && !useStaticCatalog && provider.staticCatalog) {
+          result = await runProviderStaticCatalog({ provider });
+        }
+        return result ? normalizePluginDiscoveryResult({ provider, result }) : undefined;
+      },
+      (acceptedProviders) => Object.keys(acceptedProviders ?? {}),
+    );
+    if (!normalizedResult) {
       continue;
     }
-    const normalizedResult = normalizePluginDiscoveryResult({
-      provider,
-      result,
-    });
     for (const [providerId, implicitProvider] of Object.entries(normalizedResult)) {
       if (
         !includeProvider(providerId) ||
