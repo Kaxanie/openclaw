@@ -68,6 +68,7 @@ export type PreparedModelWorkerResult =
       generationFingerprint: string;
       snapshot: ModelCatalogSnapshot;
       runtimeModels: Map<string, Model[]>;
+      configuredProviderModelIds: Map<string, readonly string[]>;
       configuredRuntimeModels: PreparedModelRuntimeCatalogFacts["configuredRuntimeModels"];
       credentials: Readonly<AuthStorageData>;
       providerAuthLabels: ModelCatalogAuthLabels;
@@ -209,6 +210,7 @@ type PreparedModelCatalogWorker = Readonly<{
   loadCatalog: (providerIds?: readonly string[]) => Promise<
     Pick<PreparedModelRuntimeCatalogFacts, "modelCatalog" | "configuredRuntimeModels"> & {
       runtimeModels: Map<string, Model[]>;
+      configuredProviderModelIds: Map<string, readonly string[]>;
     }
   >;
 }>;
@@ -399,6 +401,7 @@ export function createPreparedModelCatalogWorker(
         modelCatalog,
         configuredRuntimeModels: message.configuredRuntimeModels,
         runtimeModels: message.runtimeModels,
+        configuredProviderModelIds: message.configuredProviderModelIds,
       };
     },
     loadAuth: async ({ providerIds, profileIds }) => {
