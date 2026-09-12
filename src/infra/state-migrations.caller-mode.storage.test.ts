@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveEffectiveAgentDir } from "../agents/agent-scope-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { pluginDoctorContractRegistryLoaderState } from "../plugins/doctor-contract-registry-loader-state.js";
 import { EMPTY_LEGACY_SESSION_SURFACES } from "../plugins/legacy-session-surfaces.types.js";
@@ -18,9 +19,12 @@ import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths
 import { createTrackedTempDirs } from "../test-utils/tracked-temp-dirs.js";
 import {
   autoMigrateLegacyState,
+  detectLegacyStateMigrations,
   planLegacyStateMigrationsReadOnly,
 } from "./state-migrations.doctor.js";
+import { migrateLegacyAgentDir } from "./state-migrations.legacy-sessions.js";
 import type { LegacyStateMigrationPlan } from "./state-migrations.types.js";
+import { buildUpdateRehearsalPathEnv } from "./update-rehearsal-paths.js";
 
 const tempDirs = createTrackedTempDirs();
 
@@ -77,6 +81,61 @@ afterEach(async () => {
 });
 
 describe("legacy state migration caller storage", () => {
+  it.each(["before detection", "after detection"])(
+    "keeps rehearsal SDK sources confined when an ancestor symlink escapes %s",
+    async (timing) => {
+      const fixture = await makeFixture();
+      const externalParent = path.join(fixture.homeDir, ".openclaw");
+      const externalBinary = path.join(externalParent, "agent/bin/fd");
+      fs.mkdirSync(path.dirname(externalBinary), { recursive: true });
+      fs.writeFileSync(externalBinary, "uncopied SDK binary");
+      const copiedParent = path.join(fixture.stateDir, ".openclaw");
+      const symlinkKind = process.platform === "win32" ? "junction" : "dir";
+      if (timing === "before detection") {
+        fs.symlinkSync(externalParent, copiedParent, symlinkKind);
+      } else {
+        fs.mkdirSync(path.join(copiedParent, "agent/bin"), { recursive: true });
+        fs.writeFileSync(path.join(copiedParent, "agent/bin/fd"), "copied SDK binary");
+      }
+      const env = {
+        ...fixture.env,
+        ...buildUpdateRehearsalPathEnv(fixture.stateDir),
+        OPENCLAW_UPDATE_IN_PROGRESS: "1",
+        OPENCLAW_SERVICE_REPAIR_POLICY: "external",
+        OPENCLAW_UPDATE_PARENT_ALLOWS_GATEWAY_SERVICE_REPAIR: "0",
+        OPENCLAW_UPDATE_PARENT_ALLOWS_GATEWAY_ACTIVATION: "0",
+        OPENCLAW_COMPATIBILITY_HOST_VERSION: undefined,
+      };
+      const detected = await detectLegacyStateMigrations({
+        cfg: { agents: { entries: { main: {} } }, plugins: { enabled: false } },
+        env,
+        homedir: () => fixture.stateDir,
+        legacySessionSurfaces: EMPTY_LEGACY_SESSION_SURFACES,
+      });
+      if (timing === "after detection") {
+        fs.renameSync(copiedParent, path.join(fixture.stateDir, "saved-sdk-home"));
+        fs.symlinkSync(externalParent, copiedParent, symlinkKind);
+      }
+
+      const result = await migrateLegacyAgentDir(detected, () => 1234);
+
+      expect(fs.existsSync(externalBinary)).toBe(true);
+      expect(fs.readFileSync(externalBinary, "utf8")).toBe("uncopied SDK binary");
+      expect([...detected.warnings, ...result.warnings].length).toBeGreaterThan(0);
+      const canonicalDir = path.join(fixture.stateDir, "agents/main/agent");
+      expect(fs.existsSync(path.join(canonicalDir, ".legacy-agent-dir-migration.json"))).toBe(
+        false,
+      );
+      expect(
+        resolveEffectiveAgentDir({}, "main", {
+          env,
+          homedir: () => fixture.stateDir,
+          legacyStandaloneRead: true,
+        }),
+      ).toBe(canonicalDir);
+    },
+  );
+
   it("binds WAL-backed shared-auth and meeting-transcript inputs as SQLite", async () => {
     const fixture = await makeFixture();
     const cfg: OpenClawConfig = { agents: { list: [{ id: "main", default: true }] } };

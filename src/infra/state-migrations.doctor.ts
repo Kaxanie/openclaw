@@ -1,3 +1,4 @@
+import { lstatSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -61,6 +62,7 @@ import {
   detectLegacyAcpReplayLedger,
   migrateLegacyAcpReplayLedger,
 } from "./state-migrations.acp-replay.js";
+import { resolveLegacyStandaloneAgentDir } from "./state-migrations.agent-dir-receipt.js";
 import {
   detectLegacyApnsRegistrations,
   migrateLegacyApnsRegistrations,
@@ -216,6 +218,10 @@ import {
   detectLegacyWorkspaceState,
   migrateLegacyWorkspaceState,
 } from "./state-migrations.workspace-setup.js";
+import {
+  isUpdateRehearsalReadOnlyPath,
+  resolveUpdateRehearsalRoot,
+} from "./update-rehearsal-paths.js";
 
 function describeStateSchemaMigration(migration: OpenClawStateDatabaseSchemaMigration): string {
   switch (migration.kind) {
@@ -454,15 +460,56 @@ export async function detectLegacyStateMigrations(params: {
       ),
     );
 
-  const legacyAgentDir = path.join(stateDir, "agent");
   const targetAgentDir = resolveEffectiveAgentDir(params.cfg, targetAgentId, {
     env,
     homedir: params.homedir,
   });
-  const legacyAgentDirInspection = inspectLegacyAgentDir(legacyAgentDir);
-  const hasLegacyAgentDir =
-    legacyAgentDirInspection.status === "payload" &&
-    path.resolve(legacyAgentDir) !== path.resolve(targetAgentDir);
+  const rehearsalRoot = resolveUpdateRehearsalRoot(env);
+  const seenAgentSources = new Set<string>();
+  const legacyAgentInspections = [
+    { legacyDir: resolveLegacyStandaloneAgentDir(homedir), standalone: true },
+    { legacyDir: path.join(stateDir, "agent"), standalone: false },
+  ]
+    .filter(({ legacyDir }) => {
+      const identity = resolveIdentityPathViaExistingAncestorSync(legacyDir);
+      if (seenAgentSources.has(identity)) {
+        return false;
+      }
+      seenAgentSources.add(identity);
+      return true;
+    })
+    .map((source) => {
+      // Copied plans bind stateDir, not a separate home tree; do not open its payload.
+      const outsideSnapshot =
+        isUpdateRehearsalReadOnlyPath(source.legacyDir, env) ||
+        (params.artifactPreservingReadOnly &&
+          listMigrationEndpointsOutsideRoot([{ kind: "path", path: source.legacyDir }], stateDir)
+            .length > 0);
+      const inspection = outsideSnapshot
+        ? lstatSync(source.legacyDir, { throwIfNoEntry: false })
+          ? {
+              status: "failed" as const,
+              warning: `Legacy agent source is outside the copied state snapshot: ${source.legacyDir}. Run openclaw doctor --fix on the original installation.`,
+            }
+          : { status: "empty" as const }
+        : inspectLegacyAgentDir(source.legacyDir);
+      return { source, inspection };
+    });
+  const legacyAgentSources = legacyAgentInspections.flatMap(({ source, inspection }) =>
+    inspection.status === "payload" &&
+    path.resolve(source.legacyDir) !== path.resolve(targetAgentDir)
+      ? [
+          {
+            ...source,
+            // Keep the permitted source root fixed across discovery and execution.
+            boundaryRoot: resolveIdentityPathViaExistingAncestorSync(
+              rehearsalRoot ?? (source.standalone ? path.dirname(source.legacyDir) : stateDir),
+            ),
+          },
+        ]
+      : [],
+  );
+  const hasLegacyAgentDir = legacyAgentSources.length > 0;
   const pluginStateSidecarPath = resolveLegacyPluginStateSidecarPath(stateDir);
   const hasPluginStateSidecar = migrationFileExists(pluginStateSidecarPath);
   const hasPendingPluginStateSidecarArchive = hasPendingSqliteSidecarArchive(
@@ -713,7 +760,9 @@ export async function detectLegacyStateMigrations(params: {
     preview.push(`- Sessions: repair migrated transcript paths in ${sessionsTargetStorePath}`);
   }
   if (agentDirHasLegacy) {
-    preview.push(`- Agent dir: ${legacyAgentDir} → ${targetAgentDir}`);
+    preview.push(
+      ...legacyAgentSources.map(({ legacyDir }) => `- Agent dir: ${legacyDir} → ${targetAgentDir}`),
+    );
   }
   if (hasPluginStateSidecar) {
     preview.push(`- Plugin state sidecar: ${pluginStateSidecarPath} → shared SQLite state`);
@@ -847,7 +896,7 @@ export async function detectLegacyStateMigrations(params: {
       targetStoreAliases: sessionStoreOwnership.targetStoreAliases,
     },
     agentDir: {
-      legacyDir: legacyAgentDir,
+      sources: legacyAgentSources,
       targetDir: targetAgentDir,
       hasLegacy: agentDirHasLegacy,
     },
@@ -920,7 +969,9 @@ export async function detectLegacyStateMigrations(params: {
     warnings: [
       ...pluginPlanWarnings,
       ...legacySessionSurfaces.failures,
-      ...(legacyAgentDirInspection.status === "failed" ? [legacyAgentDirInspection.warning] : []),
+      ...legacyAgentInspections.flatMap(({ inspection }) =>
+        inspection.status === "failed" ? [inspection.warning] : [],
+      ),
       ...deferredWarnings,
     ],
     notices: [...deferredNotices, ...legacyAgentQuarantineNotices(stateDir, targetAgentId)],
@@ -1825,7 +1876,7 @@ function buildLegacyStateMigrationSteps(
       uniqueMigrationEndpoints([...legacySessionStores, stateDatabase]),
     ],
     "agent-dir": [
-      pathEndpoints(detected.agentDir.legacyDir),
+      pathEndpoints(...detected.agentDir.sources.map(({ legacyDir }) => legacyDir)),
       detected.agentDir.hasLegacy,
       pathEndpoints(detected.agentDir.targetDir),
     ],

@@ -47,7 +47,7 @@ export type LegacyStateDetection = {
     targetStoreAliases: SessionStoreAliasPlan;
   };
   agentDir: {
-    legacyDir: string;
+    sources: Array<{ legacyDir: string; standalone: boolean; boundaryRoot: string }>;
     targetDir: string;
     hasLegacy: boolean;
   };

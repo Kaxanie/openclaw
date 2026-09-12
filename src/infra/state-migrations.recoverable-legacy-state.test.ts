@@ -13,7 +13,10 @@ import { EMPTY_LEGACY_SESSION_SURFACES } from "../plugins/legacy-session-surface
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { detectLegacyStateMigrations } from "./state-migrations.doctor.js";
+import {
+  detectLegacyStateMigrations,
+  planLegacyStateMigrationsReadOnly,
+} from "./state-migrations.doctor.js";
 import { migrateLegacyAgentDir } from "./state-migrations.legacy-sessions.js";
 import {
   createLegacyStateMigrationStepReceipt,
@@ -204,6 +207,126 @@ describe("recoverable legacy state", () => {
 });
 
 describe("legacy agent directory migration", () => {
+  it("defers SDK home payload outside a copied state snapshot without opening it", async () => {
+    await withOpenClawTestState(
+      { label: "standalone-agent-snapshot", layout: "split", agentEnv: "clear" },
+      async (state) => {
+        const legacyDir = path.join(state.home, ".openclaw", "agent");
+        await fs.mkdir(path.join(legacyDir, "bin"), { recursive: true });
+        await fs.writeFile(path.join(legacyDir, "bin/fd"), "uncopied SDK binary");
+        await state.writeConfig({ agents: { entries: { main: {} } }, plugins: { enabled: false } });
+        const readDirectory = vi.spyOn(fsSync, "readdirSync");
+
+        const plan = await planLegacyStateMigrationsReadOnly({
+          mode: "doctor",
+          candidate: { root: process.cwd(), version: "test" },
+          snapshot: { homeDir: state.home, stateDir: state.stateDir, configPath: state.configPath },
+          env: state.env,
+          legacySessionSurfaces: EMPTY_LEGACY_SESSION_SURFACES,
+        });
+
+        expect(plan.warnings).toContainEqual(
+          expect.stringContaining(`outside the copied state snapshot: ${legacyDir}`),
+        );
+        expect(readDirectory.mock.calls.some(([directory]) => directory === legacyDir)).toBe(false);
+        expect(plan.steps.flatMap((step) => step.source)).not.toContainEqual({
+          kind: "path",
+          path: legacyDir,
+        });
+        await expect(fs.readFile(path.join(legacyDir, "bin/fd"), "utf8")).resolves.toBe(
+          "uncopied SDK binary",
+        );
+      },
+    );
+  });
+
+  it.each(["OPENCLAW_STATE_DIR", "OPENCLAW_HOME"])(
+    "migrates the shipped SDK directory with %s and preserves state-root migration",
+    async (override) => {
+      await withOpenClawTestState(
+        { label: "standalone-agent-override", layout: "split", agentEnv: "clear" },
+        async (state) => {
+          const overrideHome = path.join(state.root, "override-home");
+          const stateDir =
+            override === "OPENCLAW_HOME" ? path.join(overrideHome, ".openclaw") : state.stateDir;
+          const env = {
+            ...state.env,
+            OPENCLAW_STATE_DIR: override === "OPENCLAW_STATE_DIR" ? stateDir : "",
+            OPENCLAW_HOME: override === "OPENCLAW_HOME" ? overrideHome : "",
+          };
+          vi.stubEnv("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
+          vi.stubEnv("OPENCLAW_HOME", env.OPENCLAW_HOME);
+          try {
+            const legacyDir = path.join(state.home, ".openclaw", "agent");
+            const stateLegacyDir = path.join(stateDir, "agent");
+            const canonicalDir = path.join(stateDir, "agents", "main", "agent");
+            for (const { directory, binary, contents } of [
+              { directory: legacyDir, binary: "fd", contents: "SDK binary" },
+              { directory: stateLegacyDir, binary: "rg", contents: "state legacy binary" },
+              { directory: canonicalDir, binary: "rg", contents: "current binary" },
+            ]) {
+              await fs.mkdir(path.join(directory, "bin"), { recursive: true });
+              await fs.writeFile(path.join(directory, "bin", binary), contents);
+            }
+            const sourceRoot = await fs.realpath(legacyDir);
+            const detect = () =>
+              detectLegacyStateMigrations({
+                cfg: { agents: { entries: { main: {} } } },
+                env,
+                legacySessionSurfaces: EMPTY_LEGACY_SESSION_SURFACES,
+              });
+            const detected = await detect();
+            expect(detected.preview).toContainEqual(expect.stringContaining(legacyDir));
+            expect(detected.preview).toContainEqual(expect.stringContaining(stateLegacyDir));
+            expect(getAgentDir()).toBe(legacyDir);
+            const result = await migrateLegacyAgentDir(detected, () => 1234);
+
+            expect(getAgentDir()).toBe(canonicalDir);
+            await expect(fs.readFile(path.join(canonicalDir, "bin/fd"), "utf8")).resolves.toBe(
+              "SDK binary",
+            );
+            await expect(fs.readFile(path.join(canonicalDir, "bin/rg"), "utf8")).resolves.toBe(
+              "current binary",
+            );
+            const receipt = await fs.readFile(
+              path.join(canonicalDir, ".legacy-agent-dir-migration.json"),
+              "utf8",
+            );
+            expect(JSON.parse(receipt)).toEqual({
+              version: 1,
+              source: sourceRoot,
+              target: await fs.realpath(canonicalDir),
+            });
+            await expect(fs.stat(legacyDir)).rejects.toMatchObject({ code: "ENOENT" });
+            await expect(fs.stat(stateLegacyDir)).rejects.toMatchObject({ code: "ENOENT" });
+            const quarantines = (await fs.readdir(stateDir)).filter((name) =>
+              name.startsWith("agent.legacy-"),
+            );
+            expect(quarantines).toHaveLength(1);
+            const quarantine = path.join(
+              stateDir,
+              expectDefined(quarantines[0], "state-root quarantine"),
+            );
+            await expect(fs.readFile(path.join(quarantine, "bin/rg"), "utf8")).resolves.toBe(
+              "state legacy binary",
+            );
+            expect(result.warnings).toEqual([
+              expect.stringContaining(path.join(quarantine, "bin/rg")),
+            ]);
+            expect((await detect()).agentDir.hasLegacy).toBe(false);
+
+            await fs.mkdir(path.join(legacyDir, "bin"), { recursive: true });
+            await fs.writeFile(path.join(legacyDir, "bin/fd"), "recreated SDK binary");
+            expect(getAgentDir()).toBe(canonicalDir);
+            expect((await detect()).preview).toContainEqual(expect.stringContaining(legacyDir));
+          } finally {
+            vi.unstubAllEnvs();
+          }
+        },
+      );
+    },
+  );
+
   it("keeps standalone state until Doctor migrates it and reports recreated legacy state", async () => {
     await withOpenClawTestState(
       { label: "standalone-agent-cutover", agentEnv: "clear" },

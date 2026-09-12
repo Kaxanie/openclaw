@@ -403,84 +403,89 @@ export async function migrateLegacyAgentDir(
     return { changes, warnings };
   }
 
-  const { legacyDir, targetDir } = detected.agentDir;
-  const conflicts: string[] = [];
-  function merge(from: string, to: string, relative: string) {
-    const source = fs.lstatSync(from);
-    const target = fs.lstatSync(to, { throwIfNoEntry: false });
-    if (!target) {
-      fs.renameSync(from, to);
-      const destination = path.relative(detected.stateDir, targetDir).replaceAll(path.sep, "/");
-      changes.push(`Moved agent file ${relative} → ${destination}`);
-    } else if (source.isDirectory() && target.isDirectory()) {
-      for (const entry of fs.readdirSync(from)) {
-        merge(path.join(from, entry), path.join(to, entry), path.join(relative, entry));
-      }
-      removeDirIfEmpty(from);
-    } else if (
-      source.isFile() &&
-      target.isFile() &&
-      source.size === target.size &&
-      // SQLite databases and sidecars remain with the database migration owner.
-      !relative.startsWith(LEGACY_AGENT_DATABASE_BASENAME) &&
-      fs.readFileSync(from).equals(fs.readFileSync(to))
-    ) {
-      fs.unlinkSync(from);
-    } else {
-      conflicts.push(relative);
-    }
-  }
-
-  try {
-    const stateRoot = fs.realpathSync(detected.stateDir);
-    ensureMigrationDir(targetDir);
-    const sourceRoot = fs.realpathSync(legacyDir);
-    const targetRoot = fs.realpathSync(targetDir);
-    if (
-      !fs.lstatSync(legacyDir).isDirectory() ||
-      !fs.lstatSync(targetDir).isDirectory() ||
-      !isPathInside(stateRoot, sourceRoot) ||
-      isPathInside(sourceRoot, targetRoot) ||
-      isPathInside(targetRoot, sourceRoot) ||
-      sourceRoot === targetRoot
-    ) {
-      return {
-        changes,
-        warnings: [
-          `Refused legacy agent migration from ${legacyDir} to ${targetDir}: overlapping directories or root symlinks could move canonical data.`,
-        ],
-      };
-    }
-    for (const entry of fs.readdirSync(sourceRoot)) {
-      // A source-carried receipt is payload, never evidence of this migration's completion.
-      if (entry === LEGACY_AGENT_DIR_RECEIPT) {
-        conflicts.push(entry);
+  const { targetDir, sources } = detected.agentDir;
+  for (const { legacyDir, standalone, boundaryRoot } of sources) {
+    const conflicts: string[] = [];
+    function merge(from: string, to: string, relative: string) {
+      const source = fs.lstatSync(from);
+      const target = fs.lstatSync(to, { throwIfNoEntry: false });
+      if (!target) {
+        fs.renameSync(from, to);
+        const destination = path.relative(detected.stateDir, targetDir).replaceAll(path.sep, "/");
+        changes.push(`Moved agent file ${relative} → ${destination}`);
+      } else if (source.isDirectory() && target.isDirectory()) {
+        for (const entry of fs.readdirSync(from)) {
+          merge(path.join(from, entry), path.join(to, entry), path.join(relative, entry));
+        }
+        removeDirIfEmpty(from);
+      } else if (
+        source.isFile() &&
+        target.isFile() &&
+        source.size === target.size &&
+        // SQLite databases and sidecars remain with the database migration owner.
+        !relative.startsWith(LEGACY_AGENT_DATABASE_BASENAME) &&
+        fs.readFileSync(from).equals(fs.readFileSync(to))
+      ) {
+        fs.unlinkSync(from);
       } else {
-        merge(path.join(sourceRoot, entry), path.join(targetRoot, entry), entry);
+        conflicts.push(relative);
       }
     }
-    if (conflicts.length > 0) {
-      // Recovery copies stay in the state root, including for external or aliased agentDir targets.
-      const backupDir = path.join(stateRoot, `agent.legacy-${now()}-${randomUUID()}`);
-      const quarantineParent = fs.realpathSync(path.dirname(backupDir));
-      if (quarantineParent !== stateRoot && !isPathInside(stateRoot, quarantineParent)) {
-        throw new Error(`Quarantine parent escaped the state directory: ${quarantineParent}`);
+
+    try {
+      const stateRoot = fs.realpathSync(detected.stateDir);
+      ensureMigrationDir(targetDir);
+      const sourceRoot = fs.realpathSync(legacyDir);
+      const targetRoot = fs.realpathSync(targetDir);
+      if (
+        !fs.lstatSync(legacyDir).isDirectory() ||
+        !fs.lstatSync(targetDir).isDirectory() ||
+        !isPathInside(boundaryRoot, sourceRoot) ||
+        isPathInside(sourceRoot, targetRoot) ||
+        isPathInside(targetRoot, sourceRoot) ||
+        sourceRoot === targetRoot
+      ) {
+        return {
+          changes,
+          warnings: [
+            ...warnings,
+            `Refused legacy agent migration from ${legacyDir} to ${targetDir}: overlapping directories or root symlinks could move canonical data.`,
+          ],
+        };
       }
-      fs.renameSync(sourceRoot, backupDir);
-      changes.push(`Quarantined ${conflicts.length} conflicting agent path(s) → ${backupDir}`);
-      for (const relative of conflicts) {
-        warnings.push(
-          `Kept ${path.join(targetDir, relative)}; quarantined legacy copy at ${path.join(backupDir, relative)}`,
-        );
+      for (const entry of fs.readdirSync(sourceRoot)) {
+        // A source-carried receipt is payload, never evidence of this migration's completion.
+        if (entry === LEGACY_AGENT_DIR_RECEIPT) {
+          conflicts.push(entry);
+        } else {
+          merge(path.join(sourceRoot, entry), path.join(targetRoot, entry), entry);
+        }
       }
-    } else {
-      fs.rmdirSync(sourceRoot);
+      if (conflicts.length > 0) {
+        // Recovery copies stay in the state root, including for external or aliased agentDir targets.
+        const backupDir = path.join(stateRoot, `agent.legacy-${now()}-${randomUUID()}`);
+        const quarantineParent = fs.realpathSync(path.dirname(backupDir));
+        if (quarantineParent !== stateRoot && !isPathInside(stateRoot, quarantineParent)) {
+          throw new Error(`Quarantine parent escaped the state directory: ${quarantineParent}`);
+        }
+        fs.renameSync(sourceRoot, backupDir);
+        changes.push(`Quarantined ${conflicts.length} conflicting agent path(s) → ${backupDir}`);
+        for (const relative of conflicts) {
+          warnings.push(
+            `Kept ${path.join(targetDir, relative)}; quarantined legacy copy at ${path.join(backupDir, relative)}`,
+          );
+        }
+      } else {
+        fs.rmdirSync(sourceRoot);
+      }
+      if (standalone) {
+        recordCompletedLegacyAgentDirMigration(sourceRoot, targetRoot);
+      }
+    } catch (error) {
+      warnings.push(
+        `Could not finish legacy agent migration: ${String(error)}. Any remaining source is preserved at ${legacyDir}. Rerun openclaw doctor --fix after resolving this error.`,
+      );
     }
-    recordCompletedLegacyAgentDirMigration(sourceRoot, targetRoot);
-  } catch (error) {
-    warnings.push(
-      `Could not finish legacy agent migration: ${String(error)}. Any remaining source is preserved at ${legacyDir}. Rerun openclaw doctor --fix after resolving this error.`,
-    );
   }
 
   return { changes, warnings, warningDisposition: "recoverable" };

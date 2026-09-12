@@ -16,7 +16,11 @@ import type {
 } from "../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { isMissingPathError } from "../infra/errno.js";
-import { hasCompletedLegacyAgentDirMigration } from "../infra/state-migrations.agent-dir-receipt.js";
+import {
+  hasCompletedLegacyAgentDirMigration,
+  resolveLegacyStandaloneAgentDir,
+} from "../infra/state-migrations.agent-dir-receipt.js";
+import { isUpdateRehearsalReadOnlyPath } from "../infra/update-rehearsal-paths.js";
 import { LEGACY_IMPLICIT_AGENT_ID, normalizeAgentId } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { registerResolvedAgentDir } from "./agent-dir-registry.js";
@@ -616,12 +620,13 @@ export function resolveEffectiveAgentDir(
   }
   const stateDir = resolveStateDir(env, deps?.homedir);
   const agentDir = path.join(stateDir, "agents", id, "agent");
-  // Shipped 2026.9.x standalone SDKs keep nonempty <state>/agent until Doctor records completion.
+  // Shipped 2026.9.x standalone SDKs keep OS-home ~/.openclaw/agent until Doctor records completion.
   // Remove this pre-migration read after the migration ships in a release.
   if (deps?.legacyStandaloneRead) {
-    const legacyDir = path.join(stateDir, "agent");
+    const legacyDir = resolveLegacyStandaloneAgentDir(deps?.homedir);
     try {
       if (
+        !isUpdateRehearsalReadOnlyPath(legacyDir, env) &&
         fs.readdirSync(legacyDir).length > 0 &&
         !hasCompletedLegacyAgentDirMigration(legacyDir, agentDir)
       ) {
