@@ -2,13 +2,14 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as openClawRoot from "../../infra/openclaw-root.js";
 import { writePackageRoot } from "../../infra/package-update-steps.test-support.js";
-import {
-  CONTROL_PLANE_UPDATE_SENTINEL_META_ENV,
-  readControlPlaneUpdateSentinelMeta,
-} from "../../infra/update-control-plane-sentinel.js";
+import * as controlPlaneSentinel from "../../infra/update-control-plane-sentinel.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+
+const { CONTROL_PLANE_UPDATE_SENTINEL_META_ENV, readControlPlaneUpdateSentinelMeta } =
+  controlPlaneSentinel;
 
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
@@ -42,10 +43,11 @@ import { updateCommand } from "./update-command.js";
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe("managed post-core root handoff", () => {
-  it.each(["replacement", "foreign-install", "inactive-generation", "pre-core"])(
+  it.each(["replacement", "foreign-install", "inactive-generation", "pre-core", "moving-link"])(
     "openclaw update admits the installed driver's original pnpm identity (%s)",
     async (scenario) => {
       const state = await createOpenClawTestState({ label: "legacy-pnpm-handoff" });
@@ -90,6 +92,23 @@ describe("managed post-core root handoff", () => {
         }
         const meta = { root: previous, handoffId: "original-driver" };
         const metaPath = await state.writeJson("sentinel-meta.json", { version: 1, meta });
+        vi.spyOn(openClawRoot, "resolveOpenClawPackageRootSync").mockReturnValue(
+          scenario === "foreign-install"
+            ? foreign
+            : scenario === "inactive-generation"
+              ? inactive
+              : current,
+        );
+        if (scenario === "moving-link") {
+          vi.spyOn(
+            controlPlaneSentinel,
+            "readControlPlaneUpdateSentinelMeta",
+          ).mockImplementationOnce(async (env) => {
+            await fs.unlink(link);
+            await fs.symlink(inactive, link, process.platform === "win32" ? "junction" : "dir");
+            return await readControlPlaneUpdateSentinelMeta(env);
+          });
+        }
         mocks.root.mockResolvedValue(
           scenario === "foreign-install"
             ? foreignLink
@@ -147,6 +166,8 @@ describe("managed post-core root handoff", () => {
           note: "Fixture update",
         };
         const metaPath = await state.writeJson("sentinel-meta.json", { version: 1, meta });
+        const executingRoot = vi.spyOn(openClawRoot, "resolveOpenClawPackageRootSync");
+        executingRoot.mockReturnValue(previous);
         await withEnvAsync({ [CONTROL_PLANE_UPDATE_SENTINEL_META_ENV]: metaPath }, async () => {
           mocks.root.mockResolvedValue(root);
           await prepareUpdateCommand({ json: true });
@@ -155,6 +176,7 @@ describe("managed post-core root handoff", () => {
           await fs.symlink(next, root, process.platform === "win32" ? "junction" : "dir");
           const foreign = state.path("different-install");
           await writePackageRoot(foreign, "2.0.0");
+          executingRoot.mockReturnValue(foreignChild ? foreign : next);
           mocks.root.mockResolvedValue(foreignChild ? foreign : root);
           let childError: unknown;
           let childMeta: Awaited<ReturnType<typeof readControlPlaneUpdateSentinelMeta>> = null;

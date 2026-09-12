@@ -2436,14 +2436,16 @@ async function spawnManagedServiceUpdateHandoff(
 export async function assertManagedServiceUpdateHandoffRoot(params: {
   expectedRoot: string;
   root: string;
+  executingRoot: string | null;
   postCore: boolean;
 }): Promise<void> {
   const expectedRoot = resolveUpdateInstallRoot(params.expectedRoot);
-  const root = resolveUpdateInstallRoot(params.root);
-  if (expectedRoot === root) {
+  const root = params.executingRoot ? resolveUpdateInstallRoot(params.executingRoot) : null;
+  const activeExecution = root !== null && resolveUpdateInstallRoot(params.root) === root;
+  if (activeExecution && expectedRoot === root) {
     return;
   }
-  if (params.postCore) {
+  if (activeExecution && params.postCore) {
     const [previous, current] = await Promise.all([
       resolvePnpmGlobalInstallOwner(expectedRoot),
       resolvePnpmGlobalInstallOwner(root),

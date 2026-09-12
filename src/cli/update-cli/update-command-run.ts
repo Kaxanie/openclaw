@@ -16,6 +16,7 @@ import {
   formatExternalSupervisorUpdateRequired,
   isGatewayExternallySupervised,
 } from "../../infra/gateway-supervision.js";
+import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import { assertNoPendingPackageActivation } from "../../infra/package-update-activation.js";
 import { normalizeUpdateChannel } from "../../infra/update-channels.js";
 import { resolveUpdateInstallKind } from "../../infra/update-check.js";
@@ -513,6 +514,8 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
   if (!postCoreUpdateResume && opts.dryRun !== true && isGatewayExternallySupervised()) {
     throw new Error(formatExternalSupervisorUpdateRequired());
   }
+  // The shim can move during preparation; the loaded module owns the executing generation.
+  const executingRoot = resolveOpenClawPackageRootSync({ moduleUrl: import.meta.url });
   const discoveredRoot = await resolveUpdateRoot();
   const installKind = await resolveUpdateInstallKind(discoveredRoot);
   // A post-core marker cannot bypass pending recovery without the live original
@@ -545,6 +548,7 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
     await assertManagedServiceUpdateHandoffRoot({
       expectedRoot: handoffRoot,
       root: discoveredRoot,
+      executingRoot,
       postCore: postCoreUpdateResume,
     });
     opts.run?.executorFence?.assertCurrent();
