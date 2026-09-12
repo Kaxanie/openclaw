@@ -10,7 +10,12 @@ import {
 import { withEnvAsync } from "../../test-utils/env.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), root: vi.fn<() => Promise<string>>() }));
+const mocks = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  root: vi.fn<() => Promise<string>>(),
+  resume: vi.fn(),
+}));
+vi.mock("./update-execution.runtime.js", () => ({ resumePostCoreUpdate: mocks.resume }));
 vi.mock("node:child_process", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -26,18 +31,82 @@ vi.mock("./shared.js", async (importOriginal) => ({
   resolveUpdateRoot: mocks.root,
 }));
 // This boundary test never inspects or changes an operator's service.
-vi.mock("./update-command-service-plan.js", () => ({
+vi.mock("./update-command-service-plan.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./update-command-service-plan.js")>()),
   resolveManagedServicePackageUpdatePlan: async () => ({ rootRedirect: null }),
 }));
 
 import { continuePostCoreUpdateInFreshProcess } from "./update-command-post-core.js";
 import { prepareUpdateCommand } from "./update-command-run.js";
+import { updateCommand } from "./update-command.js";
 
 afterEach(() => {
   vi.clearAllMocks();
 });
 
 describe("managed post-core root handoff", () => {
+  it.each(["replacement", "foreign-install", "inactive-generation", "pre-core"])(
+    "openclaw update admits the installed driver's original pnpm identity (%s)",
+    async (scenario) => {
+      const state = await createOpenClawTestState({ label: "legacy-pnpm-handoff" });
+      try {
+        await state.writeConfig({});
+        const project = state.path("pnpm", "global", "5");
+        const previous = path.join(project, ".pnpm", "openclaw@1.0.0", "node_modules", "openclaw");
+        const current = path.join(project, ".pnpm", "openclaw@2.0.0", "node_modules", "openclaw");
+        const inactive = path.join(project, ".pnpm", "openclaw@1.5.0", "node_modules", "openclaw");
+        const foreign = state.path("foreign-install");
+        for (const [root, version] of [
+          [previous, "1.0.0"],
+          [current, "2.0.0"],
+          [inactive, "1.5.0"],
+          [foreign, "2.0.0"],
+        ] as const) {
+          await writePackageRoot(root, version);
+        }
+        const link = path.join(project, "node_modules", "openclaw");
+        await fs.mkdir(path.dirname(link), { recursive: true });
+        await fs.writeFile(
+          path.join(project, "node_modules", ".modules.yaml"),
+          "layoutVersion: 5\n",
+        );
+        await fs.writeFile(
+          path.join(project, "package.json"),
+          JSON.stringify({ dependencies: { openclaw: "2.0.0" } }),
+        );
+        await fs.symlink(current, link, process.platform === "win32" ? "junction" : "dir");
+        const meta = { root: previous, handoffId: "original-driver" };
+        const metaPath = await state.writeJson("sentinel-meta.json", { version: 1, meta });
+        mocks.root.mockResolvedValue(
+          scenario === "foreign-install"
+            ? foreign
+            : scenario === "inactive-generation"
+              ? inactive
+              : link,
+        );
+        await withEnvAsync(
+          {
+            [CONTROL_PLANE_UPDATE_SENTINEL_META_ENV]: metaPath,
+            OPENCLAW_UPDATE_POST_CORE: scenario === "pre-core" ? undefined : "1",
+          },
+          async () => {
+            const command = updateCommand({ yes: true, json: true });
+            if (scenario === "replacement") {
+              await command;
+              expect(mocks.resume).toHaveBeenCalledWith(expect.objectContaining({ root: link }));
+            } else {
+              await expect(command).rejects.toThrow("Managed update handoff root mismatch");
+              expect(mocks.resume).not.toHaveBeenCalled();
+            }
+            expect(JSON.parse(await fs.readFile(metaPath, "utf8"))).toEqual({ version: 1, meta });
+          },
+        );
+      } finally {
+        await state.cleanup();
+      }
+    },
+  );
+
   it.each([false, true])(
     "binds pnpm replacement to the activated generation (foreign child=%s)",
     async (foreignChild) => {
