@@ -1,5 +1,6 @@
 /** Resolves configured agent ids, directories, workspaces, and merged agent defaults. */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
@@ -601,44 +602,62 @@ export function tryResolveConfiguredAgentWorkspaceDir(
   return configured ? stripNullBytes(resolveUserPath(configured, env)) : undefined;
 }
 
-// Agent state uses the configured agentDir or <state>/agents/<id>/agent.
-// Default resolution stays canonical for runtime, validation, and migration.
+type AgentDirResolutionEnv = { env?: NodeJS.ProcessEnv; homedir?: () => string };
+
+// Per-agent paths stay independent of process-wide install overrides.
 export function resolveEffectiveAgentDir(
   cfg: OpenClawConfig,
   agentId: string,
-  deps?: {
-    env?: NodeJS.ProcessEnv;
-    homedir?: () => string;
-    legacyStandaloneRead?: boolean;
-  },
+  deps?: AgentDirResolutionEnv,
 ): string {
   const id = normalizeAgentId(agentId);
   const configured = resolveAgentConfig(cfg, id)?.agentDir?.trim();
   const env = deps?.env ?? process.env;
-  if (configured) {
-    return resolveUserPath(configured, env, deps?.homedir);
-  }
-  const stateDir = resolveStateDir(env, deps?.homedir);
-  const agentDir = path.join(stateDir, "agents", id, "agent");
-  // Shipped 2026.9.x standalone SDKs keep OS-home ~/.openclaw/agent until Doctor records completion.
-  // Remove this pre-migration read after the migration ships in a release.
-  if (deps?.legacyStandaloneRead) {
-    const legacyDir = resolveLegacyStandaloneAgentDir(deps?.homedir);
-    try {
-      if (
-        !isUpdateRehearsalReadOnlyPath(legacyDir, env) &&
-        fs.readdirSync(legacyDir).length > 0 &&
-        !hasCompletedLegacyAgentDirMigration(legacyDir, agentDir)
-      ) {
-        return legacyDir;
+  return configured
+    ? resolveUserPath(configured, env, deps?.homedir)
+    : path.join(resolveStateDir(env, deps?.homedir), "agents", id, "agent");
+}
+
+// One install decision for Doctor and SDK: environment selection, then the configured owner.
+// Doctor targets targetDir; readDir retains shipped 2026.9.x SDK state until that target's receipt.
+// Remove the legacy read after this migration ships in a release.
+export function resolveInstallAgentDir(cfg: OpenClawConfig, deps?: AgentDirResolutionEnv) {
+  const env = deps?.env ?? process.env;
+  const homedir = deps?.homedir ?? os.homedir;
+  const owner = tryResolveAmbientOwnerAgentId(cfg);
+  const agentId = owner && listAgentIds(cfg).includes(owner) ? owner : undefined;
+  const overrideDir = env.OPENCLAW_AGENT_DIR?.replace(/^~(?=\/|$)/, () => homedir());
+  const targetDir =
+    overrideDir || (agentId ? resolveEffectiveAgentDir(cfg, agentId, deps) : undefined);
+  return {
+    agentId,
+    targetDir,
+    get readDir(): string {
+      if (overrideDir) {
+        return overrideDir;
       }
-    } catch (error) {
-      if (!isMissingPathError(error)) {
-        throw error;
+      const legacyDir = resolveLegacyStandaloneAgentDir(homedir);
+      try {
+        if (
+          !isUpdateRehearsalReadOnlyPath(legacyDir, env) &&
+          fs.readdirSync(legacyDir).length > 0 &&
+          (!targetDir || !hasCompletedLegacyAgentDirMigration(legacyDir, targetDir))
+        ) {
+          return legacyDir;
+        }
+      } catch (error) {
+        if (!isMissingPathError(error)) {
+          throw error;
+        }
       }
-    }
-  }
-  return agentDir;
+      if (!targetDir) {
+        throw new Error(
+          "Select an agent owner or set OPENCLAW_AGENT_DIR before resolving the install directory.",
+        );
+      }
+      return targetDir;
+    },
+  };
 }
 
 export function resolveAgentDir(

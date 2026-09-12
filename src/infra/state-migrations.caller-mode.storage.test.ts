@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveEffectiveAgentDir } from "../agents/agent-scope-config.js";
+import { resolveInstallAgentDir } from "../agents/agent-scope-config.js";
+import { getAgentDir } from "../agents/config.js";
+import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
+import { createConfigIO } from "../config/io.factory.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { pluginDoctorContractRegistryLoaderState } from "../plugins/doctor-contract-registry-loader-state.js";
 import { EMPTY_LEGACY_SESSION_SURFACES } from "../plugins/legacy-session-surfaces.types.js";
@@ -16,7 +19,10 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { withEnvAsync } from "../test-utils/env.js";
+import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { createTrackedTempDirs } from "../test-utils/tracked-temp-dirs.js";
+import { snapshotFiles } from "./state-migrations.caller-mode.test-helpers.js";
 import {
   autoMigrateLegacyState,
   detectLegacyStateMigrations,
@@ -81,6 +87,109 @@ afterEach(async () => {
 });
 
 describe("legacy state migration caller storage", () => {
+  it.each([
+    { name: "configured main directory", agentId: "main", custom: true, override: "none" },
+    { name: "non-main default", agentId: "worker", custom: false, override: "none" },
+    { name: "configured non-main directory", agentId: "worker", custom: true, override: "none" },
+    { name: "explicit legacy directory", agentId: "worker", custom: true, override: "legacy" },
+    { name: "explicit other directory", agentId: "worker", custom: true, override: "other" },
+    { name: "explicit tilde legacy directory", agentId: "worker", custom: true, override: "tilde" },
+  ])("shares the install directory between SDK and Doctor: $name", async (testCase) => {
+    await withOpenClawTestState(
+      { label: "install-agent-dir", layout: "split", agentEnv: "clear" },
+      async (state) => {
+        const legacyDir = path.join(state.home, ".openclaw", "agent");
+        const configuredDir = testCase.custom
+          ? state.path("configured-agent")
+          : state.agentDir(testCase.agentId);
+        const overrideDir =
+          testCase.override === "none"
+            ? undefined
+            : testCase.override === "other"
+              ? state.path("selected-agent")
+              : legacyDir;
+        const targetDir = overrideDir ?? configuredDir;
+        const agentConfig = {
+          ownership: "explicit",
+          defaults: { systemAgent: { agentId: testCase.agentId } },
+          entries: {
+            spare: {},
+            [testCase.agentId]: testCase.custom ? { agentDir: "${SDK_FIXTURE_AGENT_DIR}" } : {},
+          },
+        };
+        await state.writeConfig({
+          agents: { $include: "agents.json" },
+          env: { vars: { SDK_FIXTURE_AGENT_DIR: configuredDir } },
+          plugins: { enabled: false },
+        });
+        fs.writeFileSync(
+          path.join(path.dirname(state.configPath), "agents.json"),
+          JSON.stringify(agentConfig),
+        );
+        const binary = process.platform === "win32" ? "fd.exe" : "fd";
+        fs.mkdirSync(path.join(legacyDir, "bin"), { recursive: true });
+        fs.writeFileSync(path.join(legacyDir, "bin", binary), "legacy binary");
+        fs.writeFileSync(path.join(legacyDir, "settings.json"), "SDK settings");
+        if (targetDir !== legacyDir) {
+          fs.mkdirSync(path.join(targetDir, "bin"), { recursive: true });
+          fs.writeFileSync(path.join(targetDir, "bin", binary), "current binary");
+        }
+        await withEnvAsync(
+          {
+            OPENCLAW_AGENT_DIR: testCase.override === "tilde" ? "~/.openclaw/agent" : overrideDir,
+            OPENCLAW_HOME: state.path("alternate-home"),
+            OPENCLAW_OFFLINE: "1",
+            SDK_FIXTURE_AGENT_DIR: undefined,
+          },
+          async () => {
+            const before = snapshotFiles(state.root);
+            expect(getAgentDir()).toBe(overrideDir ?? legacyDir);
+            expect(snapshotFiles(state.root)).toEqual(before);
+            expect(process.env.SDK_FIXTURE_AGENT_DIR).toBeUndefined();
+            const { ensureTool } = await import("../agents/utils/tools-manager.js");
+            const io = createConfigIO({
+              env: cloneEnvWithPlatformSemantics(process.env),
+              observe: false,
+              pluginValidation: "core-only",
+              shellEnvFallback: "defer",
+            });
+            const cfg = io.loadConfig({ skipSuspiciousRecovery: true });
+            const detected = await detectLegacyStateMigrations({
+              cfg,
+              env: io.env,
+              homedir: () => state.home,
+              legacySessionSurfaces: EMPTY_LEGACY_SESSION_SURFACES,
+            });
+            const migrated = await autoMigrateLegacyState({
+              cfg,
+              env: io.env,
+              homedir: () => state.home,
+              doctorOnlyStateMigrations: true,
+              legacySessionSurfaces: EMPTY_LEGACY_SESSION_SURFACES,
+            });
+            expect(
+              migrated.stepReceipts.find((receipt) => receipt.id === "agent-dir"),
+            ).toBeDefined();
+
+            expect(getAgentDir()).toBe(targetDir);
+            expect(fs.readFileSync(path.join(getAgentDir(), "settings.json"), "utf8")).toBe(
+              "SDK settings",
+            );
+            expect(detected.agentDir.targetDir).toBe(targetDir);
+            await expect(ensureTool("fd", true)).resolves.toBe(path.join(targetDir, "bin", binary));
+            expect(fs.readFileSync(path.join(targetDir, "bin", binary), "utf8")).toBe(
+              targetDir === legacyDir ? "legacy binary" : "current binary",
+            );
+            expect(snapshotFiles(state.root)[path.relative(state.root, state.configPath)]).toBe(
+              before[path.relative(state.root, state.configPath)],
+            );
+            expect(process.env.SDK_FIXTURE_AGENT_DIR).toBeUndefined();
+          },
+        );
+      },
+    );
+  });
+
   it.each(["before detection", "after detection"])(
     "keeps rehearsal SDK sources confined when an ancestor symlink escapes %s",
     async (timing) => {
@@ -127,11 +236,13 @@ describe("legacy state migration caller storage", () => {
         false,
       );
       expect(
-        resolveEffectiveAgentDir({}, "main", {
-          env,
-          homedir: () => fixture.stateDir,
-          legacyStandaloneRead: true,
-        }),
+        resolveInstallAgentDir(
+          {},
+          {
+            env,
+            homedir: () => fixture.stateDir,
+          },
+        ).readDir,
       ).toBe(canonicalDir);
     },
   );

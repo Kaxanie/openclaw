@@ -399,11 +399,11 @@ export async function migrateLegacyAgentDir(
 ): Promise<MigrationMessages> {
   const changes: string[] = [];
   const warnings: string[] = [];
-  if (!detected.agentDir.hasLegacy) {
+  const { targetDir, sources } = detected.agentDir;
+  if (!detected.agentDir.hasLegacy || !targetDir) {
     return { changes, warnings };
   }
-
-  const { targetDir, sources } = detected.agentDir;
+  const destination = path.relative(detected.stateDir, targetDir).replaceAll(path.sep, "/");
   for (const { legacyDir, standalone, boundaryRoot } of sources) {
     const conflicts: string[] = [];
     function merge(from: string, to: string, relative: string) {
@@ -411,7 +411,6 @@ export async function migrateLegacyAgentDir(
       const target = fs.lstatSync(to, { throwIfNoEntry: false });
       if (!target) {
         fs.renameSync(from, to);
-        const destination = path.relative(detected.stateDir, targetDir).replaceAll(path.sep, "/");
         changes.push(`Moved agent file ${relative} → ${destination}`);
       } else if (source.isDirectory() && target.isDirectory()) {
         for (const entry of fs.readdirSync(from)) {

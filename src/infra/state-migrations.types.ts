@@ -48,7 +48,7 @@ export type LegacyStateDetection = {
   };
   agentDir: {
     sources: Array<{ legacyDir: string; standalone: boolean; boundaryRoot: string }>;
-    targetDir: string;
+    targetDir?: string;
     hasLegacy: boolean;
   };
   pluginPlans?: {

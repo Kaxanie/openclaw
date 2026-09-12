@@ -7,7 +7,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveAmbientOwnerAgentId, resolveEffectiveAgentDir } from "./agent-scope-config.js";
+import { readCurrentConfigForResolution } from "../config/io.runtime.js";
+import { resolveInstallAgentDir } from "./agent-scope-config.js";
 
 // =============================================================================
 // Package Detection
@@ -108,17 +109,15 @@ export const APP_NAME: string = openClawConfigName || "openclaw";
 export const CONFIG_DIR_NAME: string = pkg.openclawConfig?.configDir || ".openclaw";
 export const PACKAGE_MANIFEST_VERSION: string = pkg.version || "0.0.0";
 
-const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_AGENT_DIR`;
+/** Prepare one config, environment, and directory decision for a standalone SDK operation. */
+export function getAgentDirResolution() {
+  const { config, env } = readCurrentConfigForResolution();
+  return { config, env, ...resolveInstallAgentDir(config, { env }) };
+}
 
 /** Standalone SDK default; configured sessions pass their resolved agentDir. */
 export function getAgentDir(): string {
-  const envDir = process.env[ENV_AGENT_DIR];
-  if (envDir) {
-    return envDir.replace(/^~(?=\/|$)/, () => homedir());
-  }
-  return resolveEffectiveAgentDir({}, resolveAmbientOwnerAgentId({}), {
-    legacyStandaloneRead: true,
-  });
+  return getAgentDirResolution().readDir;
 }
 
 /** Get path to managed binaries directory (fd, rg) */

@@ -1,5 +1,7 @@
+import os from "node:os";
 import path from "node:path";
 import { registerSessionResourceCleanup } from "@openclaw/ai/internal/runtime";
+import { expectDefined } from "@openclaw/normalization-core";
 import { createAssistantMessageEventStream, type AssistantMessage } from "openclaw/plugin-sdk/llm";
 // Agent session SDK tests cover default tool wiring, prompt preservation, and
 // session write-settlement behavior.
@@ -13,7 +15,11 @@ import { readRuntimePromptImageOrder } from "../../media/media-facts.js";
 import { finalizeRuntimePromptImages } from "../../media/runtime-prompt-image-provenance.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
-import { disposeOpenClawAgentDatabaseByPath } from "../../state/openclaw-agent-db.js";
+import {
+  disposeOpenClawAgentDatabaseByPath,
+  inspectOpenClawAgentDatabaseOwner,
+} from "../../state/openclaw-agent-db.js";
+import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { createZeroUsageFixture } from "../test-helpers/usage-fixtures.js";
 
 const thinkingMocks = vi.hoisted(() => ({
@@ -59,6 +65,55 @@ const testModel: Model = {
 };
 
 describe("createAgentSession runtime ownership", () => {
+  it.each(["canonical", "custom"])(
+    "keeps the implicit SDK session with its configured owner in a %s directory",
+    async (layout) => {
+      await withOpenClawTestState(
+        { label: "sdk-install-owner", agentEnv: "clear" },
+        async (state) => {
+          const agentDir =
+            layout === "custom" ? state.statePath("worker-state") : state.agentDir("worker");
+          const homedir = vi.spyOn(os, "homedir").mockReturnValue(state.home);
+          try {
+            await state.writeConfig({
+              agents: { entries: { worker: layout === "custom" ? { agentDir } : {} } },
+              plugins: { enabled: false },
+            });
+            const { session } = await createAgentSession({
+              cwd: state.workspaceDir,
+              model: testModel,
+              resourceLoader: createResourceLoader(),
+              settingsManager: SettingsManager.inMemory(),
+              modelRegistry: createTestModelRegistry(),
+            });
+            try {
+              const target = expectDefined(session.sessionManager.getSessionTarget(), "SDK target");
+              expect(target).toMatchObject({
+                agentId: "worker",
+                sessionKey: `agent:worker:sdk:${target.sessionId}`,
+                storePath: path.join(agentDir, "openclaw-agent.sqlite"),
+              });
+              expect(inspectOpenClawAgentDatabaseOwner(target.storePath)).toMatchObject({
+                status: "owned",
+                agentId: "worker",
+              });
+              expect(loadSessionEntry(target)).toMatchObject({ sessionId: target.sessionId });
+              await expect(loadTranscriptEvents(target)).resolves.toEqual(
+                expect.arrayContaining([
+                  expect.objectContaining({ type: "session", id: target.sessionId }),
+                ]),
+              );
+            } finally {
+              session.dispose();
+            }
+          } finally {
+            homedir.mockRestore();
+          }
+        },
+      );
+    },
+  );
+
   it("keeps embedded recovery construction out of the public sessions barrel", () => {
     expect(publicSessionSdk).not.toHaveProperty("createAgentSessionForEmbeddedRunner");
   });

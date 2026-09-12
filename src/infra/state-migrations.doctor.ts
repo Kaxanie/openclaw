@@ -2,11 +2,7 @@ import { lstatSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  listAgentIds,
-  resolveEffectiveAgentDir,
-  tryResolveAmbientOwnerAgentId,
-} from "../agents/agent-scope-config.js";
+import { listAgentIds, resolveInstallAgentDir } from "../agents/agent-scope-config.js";
 import { resolveSharedMainAuthAgentDir } from "../agents/auth-profiles/shared-main-dir.js";
 import {
   discardLegacyRegistryWorktrees,
@@ -266,14 +262,12 @@ const autoMigrateChecked = new Set<string>();
 const DEFERRED_LEGACY_OWNER_MESSAGE =
   "Deferred legacy agent/session migration: select an agent owner";
 
-function tryResolveDoctorStateMigrationAgentId(cfg: OpenClawConfig): string | undefined {
-  const agentId = tryResolveAmbientOwnerAgentId(cfg);
-  return agentId && listAgentIds(cfg).includes(agentId) ? agentId : undefined;
-}
-
-function tryResolveDoctorSessionMigrationAgentId(cfg: OpenClawConfig): string | undefined {
+function tryResolveDoctorSessionMigrationAgentId(
+  cfg: OpenClawConfig,
+  migrationAgentId: string | undefined,
+): string | undefined {
   return (
-    tryResolveDoctorStateMigrationAgentId(cfg) ??
+    migrationAgentId ??
     (!isPerAgentSessionStoreConfig(cfg.session?.store)
       ? resolveSessionStoreCompatibilityAgentId(cfg)
       : undefined)
@@ -368,8 +362,12 @@ export async function detectLegacyStateMigrations(params: {
   const stateDir = resolveStateDir(env, homedir);
   const oauthDir = resolveOAuthDir(env, stateDir);
   const detectSessionFiles = params.mode !== "automatic";
-  const migrationAgentId = tryResolveDoctorStateMigrationAgentId(params.cfg);
-  const sessionMigrationAgentId = tryResolveDoctorSessionMigrationAgentId(params.cfg);
+  const installDir = resolveInstallAgentDir(params.cfg, { env, homedir });
+  const migrationAgentId = installDir.agentId;
+  const sessionMigrationAgentId = tryResolveDoctorSessionMigrationAgentId(
+    params.cfg,
+    migrationAgentId,
+  );
   const targetAgentId = migrationAgentId ?? sessionMigrationAgentId ?? LEGACY_IMPLICIT_AGENT_ID;
   const rawMainKey = params.cfg.session?.mainKey;
   const targetMainKey =
@@ -460,10 +458,10 @@ export async function detectLegacyStateMigrations(params: {
       ),
     );
 
-  const targetAgentDir = resolveEffectiveAgentDir(params.cfg, targetAgentId, {
-    env,
-    homedir: params.homedir,
-  });
+  const targetAgentDir = installDir.targetDir;
+  const targetAgentIdentity = targetAgentDir
+    ? resolveIdentityPathViaExistingAncestorSync(targetAgentDir)
+    : undefined;
   const rehearsalRoot = resolveUpdateRehearsalRoot(env);
   const seenAgentSources = new Set<string>();
   const legacyAgentInspections = [
@@ -472,7 +470,7 @@ export async function detectLegacyStateMigrations(params: {
   ]
     .filter(({ legacyDir }) => {
       const identity = resolveIdentityPathViaExistingAncestorSync(legacyDir);
-      if (seenAgentSources.has(identity)) {
+      if (identity === targetAgentIdentity || seenAgentSources.has(identity)) {
         return false;
       }
       seenAgentSources.add(identity);
@@ -496,8 +494,7 @@ export async function detectLegacyStateMigrations(params: {
       return { source, inspection };
     });
   const legacyAgentSources = legacyAgentInspections.flatMap(({ source, inspection }) =>
-    inspection.status === "payload" &&
-    path.resolve(source.legacyDir) !== path.resolve(targetAgentDir)
+    inspection.status === "payload"
       ? [
           {
             ...source,
@@ -1090,12 +1087,14 @@ function buildPlannedPluginStateMigrationDescriptor(params: {
 
 function buildUnresolvedBlockedMigrationSteps(params: {
   mode: LegacyStateMigrationMode;
+  env: NodeJS.ProcessEnv;
   skipAgentScopedMigrations: boolean;
   pluginStateMigrationInventory?: PluginDoctorStateMigrationInventory;
 }): LegacyStateMigrationStep[] {
   return unresolvedMigrationStepLayout.flatMap(([id, phase, scope]) => {
     const included =
       scope === "all" ||
+      (id === "agent-dir" && Boolean(params.env.OPENCLAW_AGENT_DIR)) ||
       (scope === "doctor" && params.mode === "doctor") ||
       (scope === "automatic" && params.mode === "automatic") ||
       (scope === "doctor-agent" && params.mode === "doctor" && !params.skipAgentScopedMigrations) ||
@@ -2167,7 +2166,7 @@ function buildLegacyStateMigrationSteps(
       runWithoutFileDetection: true,
     });
   }
-  if (!params.skipAgentScopedMigrations) {
+  if (!params.skipAgentScopedMigrations || env.OPENCLAW_AGENT_DIR) {
     finalSteps.push(finalStep("agent-dir", () => migrateLegacyAgentDir(detected, now)));
   }
   if (
@@ -2457,6 +2456,7 @@ export async function planLegacyStateMigrationsReadOnly(params: {
       detectionStep,
       ...buildUnresolvedBlockedMigrationSteps({
         mode: params.mode,
+        env,
         skipAgentScopedMigrations: hasCustomAgentDirOverride(env),
         pluginStateMigrationInventory,
       }),
@@ -2517,6 +2517,7 @@ export async function planLegacyStateMigrationsReadOnly(params: {
       }),
       ...buildUnresolvedBlockedMigrationSteps({
         mode: params.mode,
+        env,
         skipAgentScopedMigrations: hasCustomAgentDirOverride(env),
         pluginStateMigrationInventory,
       }),
@@ -3261,7 +3262,10 @@ async function executeLegacyStateMigrations(
         });
       // Capture ownership before orphan-key rewrites. Atomic replacement can split
       // a configured filesystem alias from the standard target pathname.
-      const ownershipAgentId = tryResolveDoctorSessionMigrationAgentId(params.cfg);
+      const ownershipAgentId = tryResolveDoctorSessionMigrationAgentId(
+        params.cfg,
+        resolveInstallAgentDir(params.cfg, { env, homedir }).agentId,
+      );
       sessionStoreOwnership = ownershipAgentId
         ? resolveSessionStoreOwnership({
             cfg: params.cfg,
@@ -3375,6 +3379,7 @@ async function executeLegacyStateMigrations(
       }),
       ...buildUnresolvedBlockedMigrationSteps({
         mode,
+        env,
         skipAgentScopedMigrations: hasCustomAgentDirOverride(env),
         pluginStateMigrationInventory,
       }),
@@ -3765,6 +3770,7 @@ async function executeLegacyStateMigrations(
       ...blockedStepReceipts({
         steps: buildUnresolvedBlockedMigrationSteps({
           mode,
+          env,
           skipAgentScopedMigrations: hasCustomAgentDirOverride(env),
           pluginStateMigrationInventory,
         }),
