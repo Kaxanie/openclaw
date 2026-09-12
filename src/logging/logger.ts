@@ -630,11 +630,8 @@ function buildLogger(): TsLogger<LogObj> {
           ...fields,
         },
         new Set(messageParts.filter((part) => part.messageText).map((part) => part.key)),
+        (masked) => buildFileLogMessage(masked, messageParts),
       );
-      const message = buildFileLogMessage(record, messageParts);
-      if (message) {
-        record.message = message;
-      }
       const line = JSON.stringify(record);
       fileLogTransport.enqueue({
         file: activeFile,

@@ -86,6 +86,175 @@ const patternCases = [
 ];
 
 it.each([false, true])(
+  "Gateway plugin service preserves anchored string patterns (custom-only=%s)",
+  async (customOnly) => {
+    vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
+    vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
+    const file = paths.nextPath();
+    applyLoggingConfig({
+      level: "info",
+      file,
+      consoleStyle: "json",
+      consoleLevel: "info",
+      redactPatterns: [
+        ...(customOnly ? [] : getDefaultRedactPatterns()),
+        "^private-value$",
+        "^private-marker",
+      ],
+    });
+    const output = vi.fn();
+    loggingState.rawConsole = { log: output, info: output, warn: output, error: output };
+    const logger = createSubsystemLogger("anchored-record");
+    const { api, registry } = registerPlugin(logger, "anchored-record");
+    api.registerService({
+      id: "anchored-record",
+      start() {
+        logger.info("anchored pattern", {
+          value: "private-value",
+          changed: "private-marker qwer-tyui-opas-dfgh",
+        });
+      },
+    });
+    const services = await startPluginServices({ registry, config: {} });
+    await services.stop();
+    await flushLogger();
+    const records = fs
+      .readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const consoleRecords = output.mock.calls.map(([line]) => JSON.parse(String(line)));
+    const tail = (await readConfiguredLogTail()).lines.map((line) => JSON.parse(line));
+    expect(records).toHaveLength(1);
+    expect(consoleRecords).toHaveLength(1);
+    expect(tail).toHaveLength(1);
+    for (const value of [records[0][1].value, consoleRecords[0].value, tail[0][1].value]) {
+      expect(value).toBe("***");
+    }
+    for (const row of [records[0][1], consoleRecords[0], tail[0][1]]) {
+      expect(row.changed).not.toContain("private-marker");
+      expect(row.changed).not.toContain("qwer-tyui-opas-dfgh");
+      expect(row.changed).toContain("…");
+    }
+  },
+);
+
+it.each([false, true])(
+  "Gateway plugin service masks full-record contexts and every JSON scalar (custom-only=%s)",
+  async (customOnly) => {
+    vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
+    vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
+    const file = paths.nextPath();
+    applyLoggingConfig({
+      level: "info",
+      file,
+      consoleStyle: "json",
+      consoleLevel: "info",
+      redactPatterns: [
+        ...(customOnly ? [] : getDefaultRedactPatterns()),
+        String.raw`/\{"account":"([^"]+)"/g`,
+        String.raw`/"kind":"private","account":"([^"]+)"/g`,
+        String.raw`/"account":\["([^"]+)"\]/g`,
+        String.raw`/"account":(\d+)/g`,
+        String.raw`/"enabled":(true|false)/g`,
+        String.raw`/"nullable":(null)/g`,
+        String.raw`/"block":(\[[^\]]+\])/g`,
+        String.raw`/("combination":123456)/g`,
+        String.raw`/"message":"message-only ([^"]+)"/g`,
+      ],
+    });
+    const output = vi.fn();
+    loggingState.rawConsole = { log: output, info: output, warn: output, error: output };
+    const logger = createSubsystemLogger("full-record");
+    const rawLogger = getChildLogger({ subsystem: "full-record" });
+    const { api, registry } = registerPlugin(logger, "full-record");
+    const credential = "CONTEXT_PRIVATE_VALUE";
+    let conversions = 0;
+    api.registerService({
+      id: "full-record",
+      start() {
+        logger.info("brace context", {
+          account: credential,
+          ordinary: "visible",
+          scenario: "brace",
+        });
+        logger.info("sibling context", {
+          kind: "private",
+          account: credential,
+          scenario: "sibling",
+        });
+        logger.info("array context", { account: [credential], scenario: "array" });
+        logger.info("scalar context", {
+          account: 123456,
+          enabled: true,
+          nullable: null,
+          scenario: "scalars",
+        });
+        logger.info("structure context", {
+          block: [123456, false, null],
+          keyAndValue: { combination: 123456 },
+          scenario: "structure",
+        });
+        logger.info("password=value&safe=1", {
+          scenario: "built-in",
+          payload: "https://example.test/?password=value&safe=1",
+        });
+        logger.info("message-only opaque-value", { scenario: "display-only" });
+        rawLogger.info(
+          undefined,
+          "derived context",
+          new (class {
+            toJSON() {
+              conversions += 1;
+              return { account: credential };
+            }
+          })(),
+        );
+      },
+    });
+    const services = await startPluginServices({ registry, config: {} });
+    await services.stop();
+    await flushLogger();
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+    const records = lines.map((line) => JSON.parse(line));
+    const consoleRecords = output.mock.calls.map(([line]) => JSON.parse(String(line)));
+    const tail = await readConfiguredLogTail();
+    expect(records).toHaveLength(8);
+    expect(consoleRecords).toHaveLength(7);
+    expect(tail.lines).toEqual(lines);
+    for (const values of [
+      records.slice(0, 5).map((record) => record[1]),
+      consoleRecords.slice(0, 5),
+    ]) {
+      expect(values).toMatchObject([
+        { scenario: "brace", account: "CONTEX…ALUE", ordinary: "visible" },
+        { scenario: "sibling", kind: "private", account: "CONTEX…ALUE" },
+        { scenario: "array", account: ["CONTEX…ALUE"] },
+        { scenario: "scalars", account: "***", enabled: "***", nullable: "***" },
+        {
+          scenario: "structure",
+          block: ["***", "***", "***"],
+          keyAndValue: { "***": "***" },
+        },
+      ]);
+    }
+    expect(conversions).toBe(1);
+    expect(records[5]).toMatchObject({
+      "1": { payload: "https://example.test/?password=***&safe=1" },
+      message: "password=***&safe=1",
+    });
+    expect(consoleRecords[5]).toMatchObject({
+      payload: "https://example.test/?password=***&safe=1",
+      message: "password=***&safe=1",
+    });
+    expect(records[6].message).toBe("message-only ***");
+    expect(consoleRecords[6].message).toBe("message-only ***");
+    expect(records[7].message).toBe('derived context {"account":"CONTEX…ALUE"}');
+    expect(JSON.stringify([records, consoleRecords, tail.lines])).not.toContain(credential);
+  },
+);
+
+it.each([false, true])(
   "Gateway plugin service preserves configured JSON-context captures (custom-only=%s)",
   async (customOnly) => {
     vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
@@ -99,7 +268,7 @@ it.each([false, true])(
       redactPatterns: [
         ...(customOnly ? [] : getDefaultRedactPatterns()),
         String.raw`/"account":"([^"]+)"/g`,
-        String.raw`/"customer":"(.+)"/g`,
+        String.raw`/"customer":"([\s\S]+?)","repeat"/g`,
         String.raw`/"repeat":"repeat-(repeat)"/g`,
         String.raw`/(?<="lookup":")[^"]+/g`,
         String.raw`/"overlap":"(hidden[A-Z]{20})"|hidden/g`,
@@ -139,11 +308,11 @@ it.each([false, true])(
     expect(records).toHaveLength(1);
     expect(consoleRecords).toHaveLength(1);
     expect(tail).toHaveLength(1);
-    for (const [index, record] of [records[0][1], consoleRecords[0], tail[0][1]].entries()) {
+    for (const record of [records[0][1], consoleRecords[0], tail[0][1]]) {
       expect(record).toMatchObject({
         scenario: "context",
         account: "***",
-        customer: index === 2 ? "***" : "prefix…tail",
+        customer: "prefix…tail",
         repeat: "repeat-***",
         lookup: "***",
         adjacent: "***ABCDEF…QRST",
@@ -160,8 +329,7 @@ it.each([false, true])(
 it.each(patternCases)(
   "Gateway plugin service logger preserves JSONL, credential headers, and pattern reload ($name)",
   async ({ name, custom, patterns }) => {
-    const maskedMessage =
-      name === "custom-only" ? '--token "synthe…3456"' : '--token ***synthe…3456"';
+    const maskedMessage = name === "custom-only" ? '--token "synthe…3456"' : "***";
     vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
     vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
     const file = paths.nextPath();
@@ -237,7 +405,7 @@ it.each(patternCases)(
       unchanged: 42,
     });
     expect(records[2][1]).toMatchObject({
-      "Proxy-Authorization": "Basic …YXNz",
+      "Proxy-Authorization": name === "custom-only" ? "Basic …YXNz" : "***",
       headers: maskedHeaders,
     });
     expect(accessorReads).toBe(1);
@@ -248,7 +416,7 @@ it.each(patternCases)(
     expect(consoleRecords[1]).toMatchObject({
       token: "***",
       message: "abcd-e…mnop",
-      "Proxy-Authorization": "Basic …YXNz",
+      "Proxy-Authorization": name === "custom-only" ? "Basic …YXNz" : "***",
       headers: maskedHeaders,
     });
     expect(JSON.stringify(consoleRecords)).not.toContain(keySecret);
@@ -256,12 +424,7 @@ it.each(patternCases)(
     expect(consoleRecords[3].message).toBe("CUSTOM_ONLY_VALUE ***");
     expect(records.at(-1).message).toBe("CUSTOM_ONLY_VALUE ***");
     const tail = await readConfiguredLogTail();
-    expect(tail.lines.map((line) => JSON.parse(line))).toEqual(
-      records.with(2, {
-        ...records[2],
-        "1": { ...records[2][1], "Proxy-Authorization": "***" },
-      }),
-    );
+    expect(tail.lines.map((line) => JSON.parse(line))).toEqual(records);
   },
 );
 
@@ -290,7 +453,7 @@ it("Gateway plugin service logger overflow marker preserves quoted hostname JSON
   expect(records).toHaveLength(2);
   expect(records[0]).toMatchObject({
     dropped: 1,
-    hostname: '--token ***synthe…3456"',
+    hostname: "***",
     message: "[openclaw] file log queue overflow; dropped 1 oldest record",
   });
   expect(records[1].message).toBe("second");
@@ -299,8 +462,7 @@ it("Gateway plugin service logger overflow marker preserves quoted hostname JSON
 it.each(patternCases)(
   "Gateway plugin service masks complete long strings, secret fields, and derived messages ($name)",
   async ({ name, patterns }) => {
-    const maskedMessage =
-      name === "custom-only" ? '--token "synthe…3456"' : '--token ***synthe…3456"';
+    const maskedMessage = name === "custom-only" ? '--token "synthe…3456"' : "***";
     vi.stubEnv("OPENCLAW_TEST_FILE_LOG", "1");
     vi.stubEnv("OPENCLAW_TEST_CONSOLE", "1");
     const file = paths.nextPath();
@@ -374,10 +536,10 @@ it.each(patternCases)(
     expect(records[0][2]).toBe(maskedLong);
     expect(consoleRecords[0]).toMatchObject({ message: maskedLong, payload: maskedLong });
     const maskedFields = {
-      password: "sk-abc…NDER",
-      token: "sk-abc…NDER",
-      Authorization: "sk-abc…NDER",
-      clientSecret: "CUSTOM…NDER",
+      password: name === "custom-only" ? "sk-abc…NDER" : "***",
+      token: name === "custom-only" ? "sk-abc…NDER" : "***",
+      Authorization: name === "custom-only" ? "sk-abc…NDER" : "***",
+      clientSecret: name === "custom-only" ? "CUSTOM…NDER" : "***",
       TOKEN: "${TOKEN:-***}",
       session: "$WORKSPACE_DIR/session.jsonl",
     };
@@ -385,12 +547,14 @@ it.each(patternCases)(
     expect(consoleRecords[1]).toMatchObject(maskedFields);
     expect(conversions).toBe(1);
     expect(records[2].message).toBe(
-      `derived class ${JSON.stringify({ token: "OPAQUE…OKEN", text: maskedMessage })}`,
+      name === "custom-only"
+        ? `derived class ${JSON.stringify({ token: "OPAQUE…OKEN", text: maskedMessage })}`
+        : "***",
     );
     expect(records[3].message).toBe('{"scenario":"first-class","note":"abcd-e…mnop"}');
     expect(consoleRecords[2].converted).toEqual({
       text: maskedMessage,
-      token: "sk-abc…NDER",
+      token: name === "custom-only" ? "sk-abc…NDER" : "***",
     });
     const tail = await readConfiguredLogTail({ maxBytes: 500_000 });
     expect(tail.lines.map((line) => JSON.parse(line))).toHaveLength(5);

@@ -157,7 +157,7 @@ secrets instead of relying on key-name matching. Other transcript fields and
 diagnostic sinks retain broad assignment matching.
 
 - Sensitive-value redaction is always enabled.
-- `logging.redactPatterns`: array of regex strings (replaces the default string list). Built-in structural protections for secret-bearing log fields, form bodies, structured authorization headers, and bare AWS secret access keys always apply. File and JSON console records apply these protections before JSON encoding. Configured patterns also match each string field's serialized `"key":"value"` fragment, so JSON-context rules keep working; captured characters are masked in the field before encoding.
+- `logging.redactPatterns`: array of regex strings (replaces the default string list). Built-in structural protections for secret-bearing log fields, form bodies, structured authorization headers, and bare AWS secret access keys always apply. File and JSON console records apply these protections before JSON encoding. Configured patterns match decoded values and the complete serialized record, including context across fields and arrays. Captures within strings are re-escaped; captures in numbers, booleans, or null replace the scalar with a quoted mask. JSON structure stays valid.
   - Use raw regex strings (auto `gi`), or `/pattern/flags` for custom flags.
   - Matches are masked keeping the first 6 + last 4 chars (values >= 18 chars). Shorter values become `***`.
   - Defaults cover common key assignments, CLI flags, JSON fields, bearer headers, PEM blocks, popular vendor token prefixes, and payment credential field names (card number, CVC/CVV, shared payment token, payment credential).
