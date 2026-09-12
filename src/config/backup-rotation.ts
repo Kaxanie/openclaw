@@ -1,32 +1,89 @@
-// Rotates config backup files while preserving recent recovery points.
+// Config publication stages candidates before consuming recovery history.
 import type fs from "node:fs";
 import path from "node:path";
-import { captureConfigWriteLockGuard } from "./write-lock.js";
+import { tempFile } from "../infra/fs-safe-advanced.js";
+import { replaceFileAtomicSync } from "../infra/replace-file.js";
 
 const CONFIG_BACKUP_COUNT = 5;
 
-interface BackupMaintenanceFs<T> {
-  unlink: (path: string) => T;
-  rename: (from: string, to: string) => T;
-  chmod?: (path: string, mode: number) => T;
-  copyFile: (from: string, to: string) => T;
-}
-
-/** One operation order for asynchronous include adapters and synchronous root publication. */
-function* configBackupOperations<T>(configPath: string, ioFs: BackupMaintenanceFs<T>) {
-  const backupBase = `${configPath}.bak`;
-  yield () => ioFs.unlink(`${backupBase}.${CONFIG_BACKUP_COUNT - 1}`);
-  for (let index = CONFIG_BACKUP_COUNT - 2; index >= 0; index--) {
-    const from = index === 0 ? backupBase : `${backupBase}.${index}`;
-    yield () => ioFs.rename(from, `${backupBase}.${index + 1}`);
-  }
-  yield () => ioFs.copyFile(configPath, backupBase);
-  if (ioFs.chmod) {
-    const chmod = ioFs.chmod;
-    for (let index = 0; index < CONFIG_BACKUP_COUNT; index++) {
-      yield () => chmod(index === 0 ? backupBase : `${backupBase}.${index}`, 0o600);
+/** Prepare backup bytes without blocking unrelated Gateway requests. */
+export async function prepareConfigFileWrite(params: {
+  configPath: string;
+  content: string;
+  previousRaw: string | null;
+  fsModule: typeof fs;
+  assertCurrent?: () => void;
+  destinationHardlinks?: "reject";
+  durable?: boolean;
+}) {
+  const { configPath, fsModule, assertCurrent } = params;
+  assertCurrent?.();
+  let backup: Awaited<ReturnType<typeof tempFile>> | undefined;
+  try {
+    if (params.previousRaw !== null) {
+      backup = await tempFile({
+        rootDir: path.dirname(configPath),
+        prefix: "openclaw-config-backup",
+        fileName: "original",
+      });
+      assertCurrent?.();
+      await using handle = await fsModule.promises.open(backup.path, "wx", 0o600);
+      assertCurrent?.();
+      await handle.writeFile(params.previousRaw, "utf8");
+      assertCurrent?.();
+      if (params.durable) {
+        await handle.sync();
+        assertCurrent?.();
+      }
     }
+  } catch {
+    await backup?.[Symbol.asyncDispose]();
+    backup = undefined;
+    // Backup creation remains best effort; failed preparation never consumes history.
+    assertCurrent?.();
   }
+  return {
+    publish() {
+      return replaceFileAtomicSync({
+        filePath: configPath,
+        content: params.content,
+        dirMode: 0o700,
+        mode: 0o600,
+        copyFallbackOnPermissionError: true,
+        destinationHardlinks: params.destinationHardlinks,
+        syncTempFile: params.durable,
+        syncParentDir: params.durable,
+        fileSystem: fsModule,
+        beforeRename: () => {
+          if (!backup) {
+            return;
+          }
+          const bestEffort = (operation: () => void) => {
+            assertCurrent?.();
+            try {
+              operation();
+            } catch {
+              assertCurrent?.();
+            }
+          };
+          const base = `${configPath}.bak`;
+          bestEffort(() => fsModule.unlinkSync(`${base}.${CONFIG_BACKUP_COUNT - 1}`));
+          for (let index = CONFIG_BACKUP_COUNT - 2; index >= 0; index--) {
+            const from = index === 0 ? base : `${base}.${index}`;
+            bestEffort(() => fsModule.renameSync(from, `${base}.${index + 1}`));
+          }
+          const preparedBackupPath = backup.path;
+          bestEffort(() => fsModule.renameSync(preparedBackupPath, base));
+          for (let index = 0; index < CONFIG_BACKUP_COUNT; index++) {
+            bestEffort(() => fsModule.chmodSync(index === 0 ? base : `${base}.${index}`, 0o600));
+          }
+        },
+      });
+    },
+    async [Symbol.asyncDispose]() {
+      await backup?.[Symbol.asyncDispose]();
+    },
+  };
 }
 
 interface PreUpdateSnapshotFs {
@@ -71,46 +128,5 @@ export async function createPreUpdateConfigSnapshot(params: {
   } catch {
     // Best-effort: let the update continue, but allow its later snapshot pass to retry.
     preUpdateConfigSnapshotsWritten.delete(snapshotKey);
-  }
-}
-
-/** Runs rotation, primary copy, and permission hardening. */
-export async function maintainConfigBackups(
-  configPath: string,
-  ioFs: BackupMaintenanceFs<Promise<void>>,
-  assertConfigPathForWrite?: () => void,
-): Promise<void> {
-  const sourceGuard = captureConfigWriteLockGuard(configPath);
-  const assertCurrent = () => {
-    sourceGuard?.();
-    assertConfigPathForWrite?.();
-  };
-  for (const operation of configBackupOperations(configPath, ioFs)) {
-    assertCurrent();
-    await operation().catch(() => {
-      // Missing slots and backup I/O failures remain best effort.
-      assertCurrent();
-    });
-  }
-}
-
-export function maintainConfigBackupsSync(
-  configPath: string,
-  ioFs: typeof fs,
-  assertCurrent?: () => void,
-): void {
-  for (const operation of configBackupOperations(configPath, {
-    unlink: ioFs.unlinkSync,
-    rename: ioFs.renameSync,
-    copyFile: ioFs.copyFileSync,
-    chmod: ioFs.chmodSync,
-  })) {
-    assertCurrent?.();
-    try {
-      operation();
-    } catch {
-      // Match asynchronous backup maintenance without yielding during publication.
-      assertCurrent?.();
-    }
   }
 }

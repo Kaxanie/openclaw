@@ -65,7 +65,7 @@ const validationMocks = vi.hoisted(() => ({
   })),
 }));
 const backupMocks = vi.hoisted(() => ({
-  maintainConfigBackups: vi.fn<typeof import("./backup-rotation.js").maintainConfigBackups>(),
+  prepareConfigFileWrite: vi.fn<typeof import("./backup-rotation.js").prepareConfigFileWrite>(),
 }));
 const fileLockMocks = vi.hoisted(() => ({
   withFileLock: vi.fn<typeof import("../infra/file-lock.js").withFileLock>(),
@@ -81,10 +81,10 @@ vi.mock("./validation.js", async (importOriginal) => ({
 }));
 vi.mock("./backup-rotation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./backup-rotation.js")>();
-  backupMocks.maintainConfigBackups.mockImplementation(actual.maintainConfigBackups);
+  backupMocks.prepareConfigFileWrite.mockImplementation(actual.prepareConfigFileWrite);
   return {
     ...actual,
-    maintainConfigBackups: backupMocks.maintainConfigBackups,
+    prepareConfigFileWrite: backupMocks.prepareConfigFileWrite,
   };
 });
 vi.mock("../infra/file-lock.js", async (importOriginal) => ({
@@ -686,18 +686,22 @@ describe("config mutate helpers", () => {
       }),
   );
 
-  it.each(["void", "root hash"])(
-    "replaceConfigFile keeps a legacy %s writer revision unknown",
+  it.each(["void", "plain", "include"])(
+    "replaceConfigFile reports a usable revision only for a legacy %s single-file result",
     async (receipt) => {
       const snapshot = createSnapshot({
         hash: "hash-1",
         sourceConfig: { gateway: { auth: { mode: "token" } } },
       });
 
-      if (receipt === "root hash") {
+      const persistedConfig = {
+        gateway: { auth: { mode: "token", token: "minted" } },
+        ...(receipt === "include" ? { $include: "extra.json5" } : {}),
+      };
+      if (receipt !== "void") {
         ioMocks.writeConfigFile.mockResolvedValue({
           persistedHash: "root-only-hash",
-          persistedConfig: { gateway: { auth: { mode: "token", token: "minted" } } },
+          persistedConfig,
         });
       }
 
@@ -708,10 +712,8 @@ describe("config mutate helpers", () => {
         writeOptions: { expectedConfigPath: snapshot.path },
       });
 
-      expect(result.persistedHash).toBeNull();
-      expect(result.nextConfig).toEqual({
-        gateway: { auth: { mode: "token", token: "minted" } },
-      });
+      expect(result.persistedHash).toBe(receipt === "plain" ? "root-only-hash" : null);
+      expect(result.nextConfig).toEqual(persistedConfig);
       expect(ioMocks.writeConfigFile).toHaveBeenCalledWith(
         { gateway: { auth: { mode: "token", token: "minted" } } },
         {
@@ -1084,7 +1086,7 @@ describe("config mutate helpers", () => {
     ).rejects.toThrow("cannot update include-owned configuration. Use a trusted shell");
 
     expect(beforeCommit).not.toHaveBeenCalled();
-    expect(backupMocks.maintainConfigBackups).not.toHaveBeenCalled();
+    expect(backupMocks.prepareConfigFileWrite).not.toHaveBeenCalled();
     expect(ioMocks.writeConfigFile).not.toHaveBeenCalled();
     expect(await fs.readFile(configPath, "utf-8")).toBe(rootRaw);
     expect(await fs.readFile(pluginsPath, "utf-8")).toBe(includedRaw);
@@ -1134,7 +1136,7 @@ describe("config mutate helpers", () => {
         ).rejects.toThrow("cannot update include-owned configuration. Use a trusted shell");
         expect(assertCurrent).toHaveBeenCalledOnce();
         expect(fallbackWrite).not.toHaveBeenCalled();
-        expect(backupMocks.maintainConfigBackups).not.toHaveBeenCalled();
+        expect(backupMocks.prepareConfigFileWrite).not.toHaveBeenCalled();
         expect(await fs.readFile(configPath, "utf8")).toBe(rootRaw);
         expect(await fs.readFile(pluginsPath, "utf8")).toBe(includedRaw);
         expect(await fs.readFile(`${pluginsPath}.bak`, "utf8")).toBe(backupRaw);
@@ -2194,9 +2196,7 @@ describe("config mutate helpers", () => {
               events.push(
                 `caller:${String(sourceConfig.plugins?.entries?.demo?.enabled ?? false)}`,
               );
-              await expect(fs.readFile(`${pluginsPath}.bak`, "utf-8")).resolves.toBe(
-                initialPluginsRaw,
-              );
+              await expect(fs.stat(`${pluginsPath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
               await expect(fs.readFile(pluginsPath, "utf-8")).resolves.toBe(initialPluginsRaw);
               throw new Error("include authority changed");
             },
@@ -2452,8 +2452,12 @@ describe("config mutate helpers", () => {
       parsed: rootConfig,
       sourceConfig: { plugins: { entries: {} } },
     });
-    backupMocks.maintainConfigBackups.mockImplementationOnce(async () => {
+    backupMocks.prepareConfigFileWrite.mockImplementationOnce(async (params) => {
+      const actual =
+        await vi.importActual<typeof import("./backup-rotation.js")>("./backup-rotation.js");
+      const prepared = await actual.prepareConfigFileWrite(params);
       await fs.writeFile(pluginsPath, concurrentPluginsRaw, "utf-8");
+      return prepared;
     });
 
     await expectPluginIncludeMutationConflict(snapshot, pluginsPath);
@@ -2478,8 +2482,12 @@ describe("config mutate helpers", () => {
       parsed: rootConfig,
       sourceConfig: { plugins: { entries: {} } },
     });
-    backupMocks.maintainConfigBackups.mockImplementationOnce(async () => {
+    backupMocks.prepareConfigFileWrite.mockImplementationOnce(async (params) => {
+      const actual =
+        await vi.importActual<typeof import("./backup-rotation.js")>("./backup-rotation.js");
+      const prepared = await actual.prepareConfigFileWrite(params);
       await fs.writeFile(configPath, concurrentRootRaw, "utf-8");
+      return prepared;
     });
 
     await expectPluginIncludeMutationConflict(snapshot, pluginsPath);

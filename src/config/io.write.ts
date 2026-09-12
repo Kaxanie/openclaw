@@ -5,14 +5,13 @@ import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
 import { isVerbose } from "../global-state.js";
 import { isVitestRuntimeEnv } from "../infra/env.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { replaceFileAtomicSync } from "../infra/replace-file.js";
 import {
   getUpdateDoctorConfigWriteAuthority,
   assertUpdateDoctorConfigInputHash,
   recordUpdateDoctorConfigWrite,
 } from "../infra/update-doctor-result.js";
 import { initializeNativeSessionCatalogPreferences } from "../plugins/native-session-catalog-config.js";
-import { maintainConfigBackupsSync } from "./backup-rotation.js";
+import { prepareConfigFileWrite } from "./backup-rotation.js";
 import { collectChangedPaths } from "./config-change-paths.js";
 import {
   configSnapshotAuditRecordMatchesPath,
@@ -497,7 +496,6 @@ export async function writeConfigFileFromContext(
       warn: (message) => deps.logger.warn(message),
       skipOutputLogs: options.skipOutputLogs,
     });
-    await options.beforeCommit?.();
     const guardedFs = createGuardedConfigFileSystem(
       configPath,
       deps.fs,
@@ -510,21 +508,16 @@ export async function writeConfigFileFromContext(
         },
       },
     );
-    // Keep rename and copy publication in one turn after asynchronous preparation.
-    const result = replaceFileAtomicSync({
-      filePath: configPath,
+    await using preparedFile = await prepareConfigFileWrite({
+      configPath,
       content: json,
-      dirMode: 0o700,
-      mode: 0o600,
-      tempPrefix: path.basename(configPath),
-      copyFallbackOnPermissionError: true,
-      fileSystem: guardedFs,
-      beforeRename: () => {
-        if (deps.fs.existsSync(configPath)) {
-          maintainConfigBackupsSync(configPath, deps.fs, options.assertConfigPathForWrite);
-        }
-      },
+      previousRaw: snapshot.raw,
+      fsModule: guardedFs,
+      assertCurrent: options.assertConfigPathForWrite,
     });
+    await options.beforeCommit?.();
+    // Candidate staging, backup renames, and guarded publication share one synchronous turn.
+    const result = preparedFile.publish();
     publication.phase = "published";
     options.assertConfigPathForWrite?.();
     publication.phase = "accepted";
@@ -649,7 +642,7 @@ export async function writeConfigFileFromContext(
         }
         throw new AggregateError(
           [error, ownershipError],
-          "Config write failed after source ownership changed",
+          `Config write failed after source ownership changed: ${formatErrorMessage(error)}`,
           { cause: ownershipError },
         );
       }

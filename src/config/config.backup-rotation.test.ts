@@ -11,7 +11,7 @@ import {
   captureManagedUpdateLeaseDatabaseIdentity,
   createManagedHandoffLeaseDatabase,
 } from "../infra/update-managed-service-handoff-database.js";
-import { createPreUpdateConfigSnapshot, maintainConfigBackups } from "./backup-rotation.js";
+import { createPreUpdateConfigSnapshot, prepareConfigFileWrite } from "./backup-rotation.js";
 import {
   expectPosixMode,
   IS_WINDOWS,
@@ -78,8 +78,13 @@ describe("config backup rotation", () => {
         fs: { writeFile: fs.writeFile, readFile: fs.readFile, existsSync },
       });
       for (let version = 1; version <= 6; version += 1) {
-        await maintainConfigBackups(configPath, fs);
-        await writeVersion(version);
+        await using prepared = await prepareConfigFileWrite({
+          configPath,
+          previousRaw: await fs.readFile(configPath, "utf8"),
+          content: JSON.stringify({ version }),
+          fsModule: fsNode,
+        });
+        prepared.publish();
       }
 
       await expect(readVersion()).resolves.toBe(6);
@@ -94,13 +99,19 @@ describe("config backup rotation", () => {
     });
   });
 
-  it("maintainConfigBackups composes rotate/copy/harden flow", async () => {
+  it("config publication preserves the old root in private recovery backups", async () => {
     await withTempHome(async () => {
       const configPath = resolveConfigPathFromTempState();
       await fs.writeFile(configPath, JSON.stringify({ token: "secret" }), { mode: 0o600 });
       await fs.writeFile(`${configPath}.bak`, "previous", { mode: 0o644 });
 
-      await maintainConfigBackups(configPath, fs);
+      await using prepared = await prepareConfigFileWrite({
+        configPath,
+        previousRaw: await fs.readFile(configPath, "utf8"),
+        content: JSON.stringify({ token: "new-secret" }),
+        fsModule: fsNode,
+      });
+      prepared.publish();
 
       // A new primary backup is created from the current config.
       await expect(fs.readFile(`${configPath}.bak`, "utf-8")).resolves.toBe(
@@ -117,7 +128,7 @@ describe("config backup rotation", () => {
     });
   });
 
-  it.each(["unlink", "rename", "copyFile", "chmod"] as const)(
+  it.each(["unlink", "rename", "chmod"] as const)(
     "stops backup maintenance when executor authority ends after %s",
     async (revokeAfter) => {
       await withTempHome(async (home) =>
@@ -173,10 +184,6 @@ describe("config backup rotation", () => {
               renameSync: (source, destination) => {
                 fsNode.renameSync(source, destination);
                 afterMutation("rename", destination);
-              },
-              copyFileSync: (source, destination, mode) => {
-                fsNode.copyFileSync(source, destination, mode);
-                afterMutation("copyFile", destination);
               },
               chmodSync: (target, mode) => {
                 fsNode.chmodSync(target, mode);

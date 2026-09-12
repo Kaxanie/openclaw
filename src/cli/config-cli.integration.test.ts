@@ -33,7 +33,7 @@ function installRuntimeSchemaReadHook(hook: () => void | Promise<void>): void {
 }
 
 describe("config cli integration", () => {
-  it.each(["restore", "external replacement", "recovery failure"])(
+  it.each(["restore", "external replacement", "empty external replacement", "recovery failure"])(
     "openclaw config set reports owned root removal with %s",
     async (recovery) => {
       const raw = '{"gateway":{"mode":"local"},"logging":{"$include":"logging.json"}}\n';
@@ -50,7 +50,10 @@ describe("config cli integration", () => {
             }
             return rename(from, to);
           });
-          const concurrentRaw = '{"gateway":{"mode":"local","port":19003}}\n';
+          const concurrentRaw =
+            recovery === "empty external replacement"
+              ? ""
+              : '{"gateway":{"mode":"local","port":19003}}\n';
           let removed = false;
           const remove = fs.rmSync;
           vi.spyOn(fs, "rmSync").mockImplementation((file, options) => {
@@ -58,7 +61,10 @@ describe("config cli integration", () => {
             if (file === configPath) {
               removed = true;
               fs.writeFileSync(includePath, '{"level":"warn"}\n');
-              if (recovery === "external replacement") {
+              if (
+                recovery === "external replacement" ||
+                recovery === "empty external replacement"
+              ) {
                 fs.writeFileSync(configPath, concurrentRaw);
               }
             }
@@ -94,32 +100,77 @@ describe("config cli integration", () => {
     },
   );
 
-  it("openclaw config set preserves all five backups after five failed stages", async () => {
-    const raw = '{"gateway":{"mode":"local"},"logging":{"level":"info"}}\n';
-    await withConfigFileHarness("openclaw-config-cli-backups-", raw, async ({ configPath }) => {
-      const backups = Array.from({ length: 5 }, (_, i) => `${configPath}.bak${i ? `.${i}` : ""}`);
-      backups.forEach((file, i) => fs.writeFileSync(file, `recovery-${i}`));
-      const open = fs.openSync;
-      vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
-        if (String(file).startsWith(`${configPath}.`) && String(file).endsWith(".tmp")) {
-          throw Object.assign(new Error("stage full"), { code: "ENOSPC" });
+  it.each(["root", "include"])(
+    "openclaw config set preserves all five %s backups after five failed stages",
+    async (location) => {
+      const includeRaw = '{"level":"info"}\n';
+      const raw =
+        JSON.stringify({
+          gateway: { mode: "local" },
+          logging: location === "include" ? { $include: "logging.json" } : { level: "info" },
+        }) + "\n";
+      await withConfigFileHarness("openclaw-config-cli-backups-", raw, async ({ configPath }) => {
+        const target =
+          location === "include" ? path.join(path.dirname(configPath), "logging.json") : configPath;
+        if (location === "include") {
+          fs.writeFileSync(target, includeRaw);
         }
-        return open(file, flags, mode);
+        const publication = await import("../config/backup-rotation.js");
+        const prepare = vi.spyOn(publication, "prepareConfigFileWrite");
+        const backups = Array.from({ length: 5 }, (_, i) => `${target}.bak${i ? `.${i}` : ""}`);
+        backups.forEach((file, i) => fs.writeFileSync(file, `recovery-${i}`));
+        const open = fs.openSync;
+        vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
+          if (
+            path.dirname(String(file)) === path.dirname(target) &&
+            path.basename(String(file)).startsWith(".fs-safe-") &&
+            String(file).endsWith(".tmp")
+          ) {
+            throw Object.assign(new Error("stage full"), { code: "ENOSPC" });
+          }
+          return open(file, flags, mode);
+        });
+        for (let attempt = 0; attempt < 5; attempt++) {
+          await expect(
+            runRegisteredConfigCommand(["config", "set", "logging.level", "debug"]),
+          ).rejects.toMatchObject({ name: "ExitError", code: 1 });
+          expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
+          expect(fs.readFileSync(target, "utf8")).toBe(location === "include" ? includeRaw : raw);
+          expect(prepare.mock.calls.at(-1)?.[0].configPath).toBe(target);
+          expect(backups.map((file) => fs.readFileSync(file, "utf8"))).toEqual([
+            "recovery-0",
+            "recovery-1",
+            "recovery-2",
+            "recovery-3",
+            "recovery-4",
+          ]);
+        }
       });
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await expect(
-          runRegisteredConfigCommand(["config", "set", "logging.level", "debug"]),
-        ).rejects.toMatchObject({ name: "ExitError", code: 1 });
+    },
+  );
+
+  it("openclaw config set preserves the parent mode when saving a long include filename", async () => {
+    const name = "a".repeat(230) + ".json";
+    const raw =
+      JSON.stringify({ gateway: { mode: "local" }, logging: { $include: "shared/" + name } }) +
+      "\n";
+    await withConfigFileHarness(
+      "openclaw-config-cli-long-include-",
+      raw,
+      async ({ configPath, tempDir }) => {
+        const parent = path.join(tempDir, "shared");
+        fs.mkdirSync(parent, { mode: 0o750 });
+        const mode = fs.statSync(parent).mode;
+        const include = path.join(parent, name);
+        const original = '{"level":"info"}\n';
+        fs.writeFileSync(include, original);
+        await runRegisteredConfigCommand(["config", "set", "logging.level", "debug"]);
+        expect(JSON.parse(fs.readFileSync(include, "utf8"))).toEqual({ level: "debug" });
+        expect(fs.readFileSync(include + ".bak", "utf8")).toBe(original);
         expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
-        expect(backups.map((file) => fs.readFileSync(file, "utf8"))).toEqual([
-          "recovery-0",
-          "recovery-1",
-          "recovery-2",
-          "recovery-3",
-          "recovery-4",
-        ]);
-      }
-    });
+        expect(fs.statSync(parent).mode).toBe(mode);
+      },
+    );
   });
 
   it.each([

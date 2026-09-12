@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { resolvePathViaExistingAncestorSync } from "../infra/boundary-path.js";
 import { isMissingPathError } from "../infra/errors.js";
 import { replaceFileAtomicSync } from "../infra/replace-file.js";
 import { isRecord } from "../utils.js";
@@ -19,9 +20,10 @@ export function createGuardedConfigFileSystem(
   fsModule: typeof fs,
   assertCurrent?: () => void,
   publication?: {
-    snapshot: ConfigFileSnapshot;
+    snapshot: Pick<ConfigFileSnapshot, "path" | "exists" | "raw" | "readError">;
     includeGraph: { hashes: Record<string, string>; targets: Record<string, string> };
     onRootRemoved?: () => void;
+    preserveDirectoryMode?: boolean;
   },
 ): typeof fs {
   if (!assertCurrent && !publication) {
@@ -39,17 +41,19 @@ export function createGuardedConfigFileSystem(
       );
     }
   };
-  const directory = path.dirname(path.resolve(configPath));
   return {
     ...fsModule,
     mkdirSync: new Proxy(fsModule.mkdirSync, {
       apply(target, thisArg, args) {
-        assertCurrent?.();
+        assertPublication();
         return Reflect.apply(target, thisArg, args);
       },
     }),
     fchmodSync: (fd, mode) => {
       assertCurrent?.();
+      if (publication?.preserveDirectoryMode && fsModule.fstatSync(fd).isDirectory()) {
+        return;
+      }
       return fsModule.fchmodSync(fd, mode);
     },
     renameSync: (source, destination) => {
@@ -82,37 +86,11 @@ export function createGuardedConfigFileSystem(
       }
       return fsModule.openSync(filePath, flags, mode);
     },
-    promises: {
-      ...fsModule.promises,
-      // Preserve mkdir's overloads while checking immediately at native dispatch.
-      mkdir: new Proxy(fsModule.promises.mkdir, {
-        apply(target, thisArg, args) {
-          assertCurrent?.();
-          return Reflect.apply(target, thisArg, args);
-        },
-      }),
-      rename: (source, destination) => {
-        assertCurrent?.();
-        return fsModule.promises.rename(source, destination);
-      },
-      open: async (filePath, flags, mode) => {
-        const handle = await fsModule.promises.open(filePath, flags, mode);
-        if (filePath === directory) {
-          // fs-safe observes this directory handle before applying its mode.
-          const chmod = handle.chmod.bind(handle);
-          handle.chmod = (nextMode) => {
-            assertCurrent?.();
-            return chmod(nextMode);
-          };
-        }
-        return handle;
-      },
-    },
   };
 }
 
 export function assertBaseSnapshotStillCurrent(
-  snapshot: ConfigFileSnapshot,
+  snapshot: Pick<ConfigFileSnapshot, "path" | "exists" | "raw" | "readError">,
   configPath: string,
   ioFs: typeof fs,
   includeGraph?: { hashes: Record<string, string>; targets: Record<string, string> },
@@ -125,8 +103,19 @@ export function assertBaseSnapshotStillCurrent(
   for (const [includePath, expectedHash] of Object.entries(includeGraph?.hashes ?? {})) {
     try {
       const expectedTarget = includeGraph?.targets[includePath];
-      if (!expectedTarget || path.normalize(ioFs.realpathSync(includePath)) !== expectedTarget) {
+      if (!expectedTarget) {
         throw new ConfigMutationConflictError("included config target changed since last load");
+      }
+      const currentTarget =
+        !snapshot.exists && expectedTarget === configPath
+          ? resolvePathViaExistingAncestorSync(includePath)
+          : ioFs.realpathSync(includePath);
+      if (path.normalize(currentTarget) !== expectedTarget) {
+        throw new ConfigMutationConflictError("included config target changed since last load");
+      }
+      // Aliases of the file being published share its owned-removal expectation below.
+      if (expectedTarget === configPath) {
+        continue;
       }
       if (hashConfigIncludeRaw(ioFs.readFileSync(expectedTarget, "utf-8")) !== expectedHash) {
         throw new ConfigMutationConflictError("included config changed since last load");
@@ -194,8 +183,11 @@ export async function tightenStateDirPermissionsIfNeeded(params: {
 
 export async function rollbackConfigFileWriteIfUnchanged(params: {
   configPath: string;
-  previousSnapshot: ConfigFileSnapshot;
+  previousSnapshot: Pick<ConfigFileSnapshot, "path" | "exists" | "raw" | "readError">;
   committedHash: string;
+  preserveDirectoryMode?: boolean;
+  durable?: boolean;
+  destinationHardlinks?: "reject";
   fsModule: typeof fs;
   assertCurrent?: () => void;
 }): Promise<boolean> {
@@ -222,11 +214,14 @@ export async function rollbackConfigFileWriteIfUnchanged(params: {
       content: params.previousSnapshot.raw,
       dirMode: 0o700,
       mode: 0o600,
-      tempPrefix: path.basename(params.configPath),
       copyFallbackOnPermissionError: true,
+      syncTempFile: params.durable,
+      syncParentDir: params.durable,
+      destinationHardlinks: params.destinationHardlinks,
       fileSystem: createGuardedConfigFileSystem(params.configPath, params.fsModule, assertCurrent, {
         snapshot: { ...params.previousSnapshot, exists: currentRaw !== null, raw: currentRaw },
         includeGraph: { hashes: {}, targets: {} },
+        preserveDirectoryMode: params.preserveDirectoryMode,
       }),
     });
     return true;
@@ -234,14 +229,10 @@ export async function rollbackConfigFileWriteIfUnchanged(params: {
   if (params.previousSnapshot.exists) {
     return false;
   }
-  try {
-    await params.fsModule.promises.unlink(params.configPath);
-  } catch (error) {
-    assertCurrent?.();
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      throw error;
-    }
-  }
+  createGuardedConfigFileSystem(params.configPath, params.fsModule, assertCurrent, {
+    snapshot: { ...params.previousSnapshot, exists: currentRaw !== null, raw: currentRaw },
+    includeGraph: { hashes: {}, targets: {} },
+  }).rmSync(params.configPath, { force: true });
   return true;
 }
 

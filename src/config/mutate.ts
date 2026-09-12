@@ -1,3 +1,4 @@
+import fsNode from "node:fs";
 // Applies scoped config mutations while preserving IO and observer state.
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { assertUpdateDoctorConfigInputHash } from "../infra/update-doctor-result
 import { isPathInside } from "../security/scan-paths.js";
 import { isRecord } from "../utils.js";
 import { parseJsonWithJson5Fallback } from "../utils/parse-json-compat.js";
-import { maintainConfigBackups } from "./backup-rotation.js";
+import { prepareConfigFileWrite } from "./backup-rotation.js";
 import {
   applyConfigEnvVars,
   cloneEnvWithPlatformSemantics,
@@ -57,6 +58,10 @@ import {
 import { configWriteCommittedSnapshot } from "./io.types.js";
 import { ConfigWritePostCommitError, type ConfigWriteRollbackStatus } from "./io.write-errors.js";
 import { injectExplicitlySetPaths, projectConfigWriteSource } from "./io.write-prepare.js";
+import {
+  createGuardedConfigFileSystem,
+  rollbackConfigFileWriteIfUnchanged,
+} from "./io.write-safety.js";
 import { warnIfJSON5CommentsWillBeStripped } from "./json5-comments.js";
 import {
   ConfigMutationConflictError,
@@ -491,16 +496,8 @@ type RootBoundIncludeFile = {
   absolutePath: string;
   relativePath: string;
   root: FsSafeRoot;
+  assertCurrent: () => void;
 };
-
-function resolveRootBoundRelativePath(target: RootBoundIncludeFile, absolutePath: string): string {
-  const relativePath = path.relative(target.root.rootReal, path.resolve(absolutePath));
-  const firstSegment = relativePath.split(path.sep)[0];
-  if (path.isAbsolute(relativePath) || firstSegment === "..") {
-    throw new Error(`Config include backup path escaped its approved root: ${absolutePath}`);
-  }
-  return relativePath;
-}
 
 async function resolveRootBoundIncludeFile(params: {
   configPath: string;
@@ -525,6 +522,11 @@ async function resolveRootBoundIncludeFile(params: {
     return {
       absolutePath,
       relativePath,
+      assertCurrent: () => {
+        if (resolveConfigIncludeWritePath(params) !== absolutePath) {
+          throw new ConfigMutationConflictError("included config target changed since last load");
+        }
+      },
       root: await createFsRoot(rootReal, {
         hardlinks: "reject",
         mkdir: true,
@@ -620,67 +622,22 @@ async function assertIncludeGraphStillMatchesSnapshot(params: {
 async function rollbackJsonFileWriteIfUnchanged(params: {
   target: RootBoundIncludeFile;
   previousRaw: string | null;
-  committedHash: string;
+  committedRaw: string | null;
 }): Promise<boolean> {
-  const currentRaw = await readRootBoundFileRawIfExists(params.target);
-  if (hashConfigIncludeRaw(currentRaw) !== params.committedHash) {
-    return false;
-  }
-  if (params.previousRaw !== null) {
-    await params.target.root.write(params.target.relativePath, params.previousRaw, {
-      mkdir: true,
-      mode: 0o600,
-      overwrite: true,
-    });
-    return true;
-  }
-  try {
-    await params.target.root.remove(params.target.relativePath);
-  } catch (error) {
-    if (!isMissingPathError(error)) {
-      throw error;
-    }
-  }
-  return true;
-}
-
-function createRootBoundBackupFs(
-  target: RootBoundIncludeFile,
-  assertConfigPathForWrite: () => void,
-) {
-  const assertCurrent = captureConfigWriteLockGuard(target.absolutePath);
-  return {
-    chmod: async (filePath: string, mode: number) => {
-      const opened = await target.root.open(resolveRootBoundRelativePath(target, filePath));
-      try {
-        assertCurrent?.();
-        assertConfigPathForWrite();
-        await opened.handle.chmod(mode);
-      } finally {
-        await opened[Symbol.asyncDispose]();
-      }
+  return await rollbackConfigFileWriteIfUnchanged({
+    configPath: params.target.absolutePath,
+    previousSnapshot: {
+      path: params.target.absolutePath,
+      exists: params.previousRaw !== null,
+      raw: params.previousRaw,
     },
-    // Root write/move/remove still lack a live mutation hook after their awaits.
-    // Full include-backup fencing is blocked by https://github.com/openclaw/fs-safe/issues/251.
-    copyFile: async (from: string, to: string) => {
-      const content = await target.root.readBytes(resolveRootBoundRelativePath(target, from));
-      await target.root.write(resolveRootBoundRelativePath(target, to), content, {
-        mkdir: true,
-        mode: 0o600,
-        overwrite: true,
-      });
-    },
-    rename: async (from: string, to: string) => {
-      await target.root.move(
-        resolveRootBoundRelativePath(target, from),
-        resolveRootBoundRelativePath(target, to),
-        { overwrite: true },
-      );
-    },
-    unlink: async (filePath: string) => {
-      await target.root.remove(resolveRootBoundRelativePath(target, filePath));
-    },
-  };
+    committedHash: hashConfigRaw(params.committedRaw),
+    fsModule: fsNode,
+    assertCurrent: params.target.assertCurrent,
+    preserveDirectoryMode: true,
+    durable: true,
+    destinationHardlinks: "reject",
+  });
 }
 
 async function writeRootBoundJsonFile(params: {
@@ -690,25 +647,13 @@ async function writeRootBoundJsonFile(params: {
   expectedTargetPath: string;
   value: unknown;
   expectedRaw: string | null;
+  includeGraph: { hashes: Record<string, string>; targets: Record<string, string> };
   assertIncludeGraphForWrite: (committedHash?: string) => Promise<void>;
   assertConfigPathForWrite: () => void;
   preCommitRuntimePreflight?: () => Promise<unknown>;
   skipOutputLogs?: boolean;
 }): Promise<void> {
   params.assertConfigPathForWrite();
-  const targetBeforeBackup = await resolveExpectedRootBoundIncludeFile({
-    configPath: params.configPath,
-    includePath: params.includePath,
-    allowedRoots: params.allowedRoots,
-    expectedAbsolutePath: params.expectedTargetPath,
-  });
-  if (await targetBeforeBackup.root.exists(targetBeforeBackup.relativePath)) {
-    await maintainConfigBackups(
-      targetBeforeBackup.absolutePath,
-      createRootBoundBackupFs(targetBeforeBackup, params.assertConfigPathForWrite),
-      params.assertConfigPathForWrite,
-    );
-  }
   await params.preCommitRuntimePreflight?.();
   const targetAtCommit = await resolveExpectedRootBoundIncludeFile({
     configPath: params.configPath,
@@ -723,6 +668,10 @@ async function writeRootBoundJsonFile(params: {
   if (currentHash !== hashConfigIncludeRaw(params.expectedRaw)) {
     throw new ConfigMutationConflictError("included config changed while preparing write");
   }
+  const assertCurrent = () => {
+    params.assertConfigPathForWrite();
+    targetAtCommit.assertCurrent();
+  };
   const content = formatJsonFileValue(params.value);
   // The include fast path bypasses writeConfigFile(); preserve config-path
   // ownership and the comment warning on the conflict-checked target.
@@ -733,27 +682,51 @@ async function writeRootBoundJsonFile(params: {
     filePath: targetAtCommit.absolutePath,
     skipOutputLogs: params.skipOutputLogs,
   });
-  await targetAtCommit.root.write(targetAtCommit.relativePath, content, {
-    mkdir: true,
-    mode: 0o600,
-    overwrite: true,
-  });
+  const publication: { phase: "unpublished" | "removed" | "published" } = { phase: "unpublished" };
+  const guardedFs = createGuardedConfigFileSystem(
+    targetAtCommit.absolutePath,
+    fsNode,
+    assertCurrent,
+    {
+      snapshot: { path: targetAtCommit.absolutePath, exists: currentRaw !== null, raw: currentRaw },
+      includeGraph: params.includeGraph,
+      preserveDirectoryMode: true,
+      onRootRemoved: () => {
+        publication.phase = "removed";
+      },
+    },
+  );
   try {
+    await using preparedFile = await prepareConfigFileWrite({
+      configPath: targetAtCommit.absolutePath,
+      previousRaw: currentRaw,
+      content,
+      fsModule: guardedFs,
+      assertCurrent,
+      destinationHardlinks: "reject",
+      durable: true,
+    });
+    preparedFile.publish();
+    publication.phase = "published";
     await params.assertIncludeGraphForWrite(hashConfigIncludeRaw(content));
     params.assertConfigPathForWrite();
   } catch (error) {
+    if (publication.phase === "unpublished") {
+      throw error;
+    }
     let rollbackStatus: ConfigWriteRollbackStatus = "unknown";
     try {
       const rolledBack = await rollbackJsonFileWriteIfUnchanged({
         target: targetAtCommit,
         previousRaw: currentRaw,
-        committedHash: hashConfigIncludeRaw(content),
+        committedRaw: publication.phase === "published" ? content : null,
       });
       rollbackStatus = rolledBack ? "restored" : "not-restored";
     } catch (rollbackError) {
       throw new ConfigWritePostCommitError({
         configPath: targetAtCommit.absolutePath,
         rollbackStatus,
+        publication: publication.phase === "removed" ? "partial" : "complete",
         cause: new AggregateError(
           [error, rollbackError],
           `${formatErrorMessage(error)} Recovery failed: ${formatErrorMessage(rollbackError)}`,
@@ -764,6 +737,7 @@ async function writeRootBoundJsonFile(params: {
     throw new ConfigWritePostCommitError({
       configPath: targetAtCommit.absolutePath,
       rollbackStatus,
+      publication: publication.phase === "removed" ? "partial" : "complete",
       cause: error,
     });
   }
@@ -955,6 +929,16 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
         expectedTargetPath: expectedIncludeTarget,
         value: includedValueToWrite,
         expectedRaw: previousIncludeRaw,
+        includeGraph: {
+          hashes: {
+            ...params.writeOptions?.includeFileHashesForWrite,
+            [params.snapshot.path]: hashConfigIncludeRaw(params.snapshot.raw),
+          },
+          targets: {
+            ...params.writeOptions?.includeFileTargetsForWrite,
+            [params.snapshot.path]: fsNode.realpathSync(params.snapshot.path),
+          },
+        },
         assertIncludeGraphForWrite,
         assertConfigPathForWrite: () => {
           assertConfigPathForWrite();
@@ -1073,7 +1057,7 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
           const rolledBack = await rollbackJsonFileWriteIfUnchanged({
             target: includeTarget,
             previousRaw: previousIncludeRaw,
-            committedHash: committedIncludeHash,
+            committedRaw: committedIncludeRaw,
           });
           rollbackStatus = rolledBack ? "restored" : "not-restored";
           if (rolledBack) {
@@ -1202,7 +1186,11 @@ async function replaceConfigFileUnlocked(
     );
     const committed = written?.[configWriteCommittedSnapshot];
     writeResult = {
-      persistedHash: committed?.hash ?? null,
+      persistedHash:
+        committed?.hash ??
+        (written && !containsConfigIncludeDirective(written.persistedConfig)
+          ? written.persistedHash
+          : null),
       persistedConfig: committed?.sourceConfig ?? written?.persistedConfig ?? nextConfig,
       persistedSourceConfig: written?.persistedSourceConfig,
     };

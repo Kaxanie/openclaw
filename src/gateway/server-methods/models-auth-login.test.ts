@@ -1,5 +1,6 @@
 import syncFs from "node:fs";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { setImmediate as nextEventLoopTurn } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
 import { Compile } from "typebox/compile";
@@ -334,7 +335,8 @@ describe("models.authLogin ownership", () => {
           const fd = openSync(file, flags, mode);
           if (
             typeof file === "string" &&
-            file.startsWith(`${state.configPath}.`) &&
+            path.dirname(file) === path.dirname(state.configPath) &&
+            path.basename(file).startsWith(".fs-safe-") &&
             file.endsWith(".tmp")
           ) {
             stagedFd = fd;
