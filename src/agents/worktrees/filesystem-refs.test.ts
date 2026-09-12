@@ -14,7 +14,9 @@ describe.skipIf(process.platform !== "win32")("ReFS worktree filesystem", () => 
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps the Windows system volume on native Git checkout", async () => {
-    const systemRoot = process.env.SystemRoot;
+    const systemRoot = Object.entries(process.env).find(
+      ([key]) => key.toLowerCase() === "systemroot",
+    )?.[1];
     assert(systemRoot);
     expect(await detectWorktreeFilesystemBackend(systemRoot, options)).toBeNull();
   });
