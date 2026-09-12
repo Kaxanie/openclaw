@@ -1,6 +1,7 @@
 // Config publication stages candidates before consuming recovery history.
 import type fs from "node:fs";
 import path from "node:path";
+import { isRootFileMissingFailure, openRootFileSync } from "../infra/boundary-file-read.js";
 import { tempFile } from "../infra/fs-safe-advanced.js";
 import { replaceFileAtomicSync } from "../infra/replace-file.js";
 
@@ -58,25 +59,52 @@ export async function prepareConfigFileWrite(params: {
           if (!backup) {
             return;
           }
-          const bestEffort = (operation: () => void) => {
+          const openBackupArtifact = (absolutePath: string) => {
+            const opened = openRootFileSync({
+              absolutePath,
+              rootPath: path.dirname(configPath),
+              boundaryLabel: "config backup directory",
+              ioFs: fsModule,
+            });
+            return {
+              ...opened,
+              [Symbol.dispose]() {
+                if (opened.ok) {
+                  fsModule.closeSync(opened.fd);
+                }
+              },
+            };
+          };
+          const mutateBackupArtifact = (from: string, to?: string) => {
             assertCurrent?.();
             try {
-              operation();
+              using destination = to ? openBackupArtifact(to) : undefined;
+              if (destination && !destination.ok && !isRootFileMissingFailure(destination)) {
+                return;
+              }
+              using source = openBackupArtifact(from);
+              if (!source.ok) {
+                return;
+              }
+              assertCurrent?.();
+              if (to) {
+                fsModule.fchmodSync(source.fd, 0o600);
+                assertCurrent?.();
+                fsModule.renameSync(source.path, to);
+              } else {
+                fsModule.unlinkSync(source.path);
+              }
             } catch {
               assertCurrent?.();
             }
           };
           const base = `${configPath}.bak`;
-          bestEffort(() => fsModule.unlinkSync(`${base}.${CONFIG_BACKUP_COUNT - 1}`));
+          mutateBackupArtifact(`${base}.${CONFIG_BACKUP_COUNT - 1}`);
           for (let index = CONFIG_BACKUP_COUNT - 2; index >= 0; index--) {
             const from = index === 0 ? base : `${base}.${index}`;
-            bestEffort(() => fsModule.renameSync(from, `${base}.${index + 1}`));
+            mutateBackupArtifact(from, `${base}.${index + 1}`);
           }
-          const preparedBackupPath = backup.path;
-          bestEffort(() => fsModule.renameSync(preparedBackupPath, base));
-          for (let index = 0; index < CONFIG_BACKUP_COUNT; index++) {
-            bestEffort(() => fsModule.chmodSync(index === 0 ? base : `${base}.${index}`, 0o600));
-          }
+          mutateBackupArtifact(backup.path, base);
         },
       });
     },

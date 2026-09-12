@@ -1697,9 +1697,19 @@ describe("config mutate helpers", () => {
       existing: null,
       failure: "read",
     },
+    {
+      name: "repairs a missing include whose parent directory is also missing",
+      kind: "missing-parent",
+      existing: null,
+      failure: "read",
+    },
   ] as const)("$name", async ({ kind, existing, failure }) => {
     const home = await suiteRootTracker.make(`${kind}-include`);
     const { configPath, pluginsPath } = await createPluginIncludeFixture(home);
+    const expectedTarget = await resolveIncludeTarget(pluginsPath);
+    if (kind === "missing-parent") {
+      await fs.rmdir(path.dirname(pluginsPath));
+    }
     if (existing !== null) {
       await fs.writeFile(pluginsPath, existing, "utf-8");
     }
@@ -1728,7 +1738,7 @@ describe("config mutate helpers", () => {
           expectedConfigPath: configPath,
           includeFileHashesForWrite: { [pluginsPath]: hashConfigIncludeRaw(existing) },
           assertConfigPathForWrite: allowConfigPathWrite,
-          includeFileTargetsForWrite: { [pluginsPath]: await resolveIncludeTarget(pluginsPath) },
+          includeFileTargetsForWrite: { [pluginsPath]: expectedTarget },
         },
       })
       .mockResolvedValueOnce({

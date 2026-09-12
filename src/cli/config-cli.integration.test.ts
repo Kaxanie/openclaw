@@ -173,6 +173,117 @@ describe("config cli integration", () => {
     );
   });
 
+  it.skipIf(process.platform === "win32").each(
+    ["direct", "chain", "parent", "relative"].flatMap((alias) =>
+      ["save", "root conflict", "alias replacement", "same target replacement"].map((outcome) => ({
+        alias,
+        outcome,
+      })),
+    ),
+  )(
+    "openclaw config set preserves $alias include identity during fallback: $outcome",
+    async ({ alias, outcome }) => {
+      const raw =
+        JSON.stringify({
+          gateway: { mode: "local" },
+          logging: {
+            $include:
+              alias === "parent"
+                ? "alias/actual.json"
+                : alias === "relative"
+                  ? "links/logging.json"
+                  : "logging.json",
+          },
+        }) + "\n";
+      await withConfigFileHarness(
+        "openclaw-config-cli-alias-",
+        raw,
+        async ({ configPath, tempDir }) => {
+          const directory = alias === "parent" ? path.join(tempDir, "real") : tempDir;
+          fs.mkdirSync(directory, { recursive: true });
+          if (alias === "relative") {
+            fs.mkdirSync(path.join(tempDir, "links"));
+          }
+          const target = path.join(directory, "actual.json");
+          const original = '{"level":"info"}\n';
+          fs.writeFileSync(target, original);
+          const link = path.join(
+            tempDir,
+            alias === "parent"
+              ? "alias"
+              : alias === "chain"
+                ? "next.json"
+                : alias === "relative"
+                  ? "links/logging.json"
+                  : "logging.json",
+          );
+          const linkTarget =
+            alias === "parent" ? "real" : alias === "relative" ? "../actual.json" : "actual.json";
+          fs.symlinkSync(linkTarget, link);
+          if (alias === "chain") {
+            fs.symlinkSync("next.json", path.join(tempDir, "logging.json"));
+          }
+          const other = path.join(tempDir, "other");
+          fs.mkdirSync(other);
+          const external = path.join(other, "actual.json");
+          const externalRaw = '{"level":"warn"}\n';
+          fs.writeFileSync(external, externalRaw);
+          const concurrentRoot =
+            JSON.stringify({ ...JSON.parse(raw), messages: { responsePrefix: "external" } }) + "\n";
+          const rename = fs.renameSync;
+          vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+            if (to === target) {
+              throw Object.assign(new Error("include rename denied"), { code: "EPERM" });
+            }
+            return rename(from, to);
+          });
+          let removed = false;
+          const remove = fs.rmSync;
+          vi.spyOn(fs, "rmSync").mockImplementation((file, options) => {
+            remove(file, options);
+            if (file === target && !removed) {
+              removed = true;
+              if (outcome === "root conflict") {
+                fs.writeFileSync(configPath, concurrentRoot);
+              } else if (outcome.endsWith("replacement")) {
+                rename(link, `${link}.original`);
+                fs.symlinkSync(
+                  outcome === "same target replacement"
+                    ? linkTarget
+                    : path.relative(path.dirname(link), alias === "parent" ? other : external),
+                  link,
+                );
+              }
+            }
+          });
+          const save = runRegisteredConfigCommand(["config", "set", "logging.level", "debug"]);
+          if (outcome === "save") {
+            await save;
+            expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({ level: "debug" });
+          } else {
+            await expect(save).rejects.toMatchObject({ name: "ExitError", code: 1 });
+            expect(registeredRuntimeErrors.join("\n")).toContain(
+              "Config publication failed after removing",
+            );
+            if (outcome === "root conflict") {
+              expect(fs.readFileSync(target, "utf8")).toBe(original);
+              expect(registeredRuntimeErrors.join("\n")).toContain("rolled back");
+            } else {
+              expect(fs.existsSync(target)).toBe(false);
+              expect(registeredRuntimeErrors.join("\n")).toContain(`${target}.bak`);
+              expect(fs.readFileSync(external, "utf8")).toBe(externalRaw);
+            }
+          }
+          expect(removed).toBe(true);
+          expect(fs.readFileSync(`${target}.bak`, "utf8")).toBe(original);
+          expect(fs.readFileSync(configPath, "utf8")).toBe(
+            outcome === "root conflict" ? concurrentRoot : raw,
+          );
+        },
+      );
+    },
+  );
+
   it.each([
     {
       name: "empty inline batch",

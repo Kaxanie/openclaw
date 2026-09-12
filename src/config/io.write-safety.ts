@@ -4,6 +4,7 @@ import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { resolvePathViaExistingAncestorSync } from "../infra/boundary-path.js";
 import { isMissingPathError } from "../infra/errors.js";
 import { replaceFileAtomicSync } from "../infra/replace-file.js";
+import { isPathInside } from "../security/scan-paths.js";
 import { isRecord } from "../utils.js";
 import { hashConfigIncludeRaw } from "./includes.js";
 import { stampConfigWriteMetadata } from "./io.meta.js";
@@ -13,6 +14,96 @@ import { ConfigMutationConflictError } from "./mutation-conflict.js";
 import { resolveStateDir } from "./paths.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
 import { captureConfigWriteLockGuard } from "./write-lock.js";
+
+/** Pin path lookups without pinning the regular file this write will replace. */
+export function captureConfigFileWritePathProof(
+  filePath: string,
+  targetPath: string,
+  ioFs: typeof fs,
+) {
+  const facts = new Map<
+    string,
+    { kind: "missing-directory" } | { kind: "existing"; dev: bigint; ino: bigint; link?: string }
+  >();
+  const visited = new Set<string>();
+  const conflict = () =>
+    new ConfigMutationConflictError("included config target changed since last load");
+  const remember = (entry: string, stat: fs.BigIntStats | undefined, link?: string) => {
+    if (!facts.has(entry)) {
+      facts.set(
+        entry,
+        stat
+          ? { kind: "existing", dev: stat.dev, ino: stat.ino, link }
+          : { kind: "missing-directory" },
+      );
+    }
+  };
+  const capture = (entry: string): void => {
+    if (visited.has(entry)) {
+      return;
+    }
+    visited.add(entry);
+    const parent = path.dirname(entry);
+    if (parent === entry) {
+      return;
+    }
+    capture(parent);
+    let realParent: string;
+    try {
+      realParent = ioFs.realpathSync(parent);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+      realParent = resolvePathViaExistingAncestorSync(parent);
+    }
+    remember(realParent, ioFs.lstatSync(realParent, { bigint: true, throwIfNoEntry: false }));
+    const lookup = path.join(realParent, path.basename(entry));
+    const stat = ioFs.lstatSync(lookup, { bigint: true, throwIfNoEntry: false });
+    if (!stat) {
+      if (!isPathInside(lookup, targetPath)) {
+        throw conflict();
+      }
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      const link = ioFs.readlinkSync(lookup);
+      remember(lookup, stat, link);
+      capture(path.isAbsolute(link) ? link : `${realParent}${path.sep}${link}`);
+    }
+  };
+  if (path.normalize(resolvePathViaExistingAncestorSync(filePath)) !== targetPath) {
+    throw conflict();
+  }
+  capture(filePath);
+  capture(targetPath);
+  const assertCurrent = () => {
+    for (const [entry, expected] of facts) {
+      const stat = ioFs.lstatSync(entry, { bigint: true, throwIfNoEntry: false });
+      if (expected.kind === "missing-directory") {
+        if (stat && !stat.isDirectory()) {
+          throw conflict();
+        }
+        continue;
+      }
+      if (
+        !stat ||
+        stat.dev !== expected.dev ||
+        stat.ino !== expected.ino ||
+        (expected.link === undefined
+          ? !stat.isDirectory()
+          : !stat.isSymbolicLink() || ioFs.readlinkSync(entry) !== expected.link)
+      ) {
+        throw conflict();
+      }
+    }
+    if (ioFs.lstatSync(targetPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw conflict();
+    }
+  };
+  assertCurrent();
+  return { path: filePath, assertCurrent };
+}
 
 /** Fence shared atomic-write effects without blocking cleanup of owned temporary files. */
 export function createGuardedConfigFileSystem(
@@ -24,11 +115,22 @@ export function createGuardedConfigFileSystem(
     includeGraph: { hashes: Record<string, string>; targets: Record<string, string> };
     onRootRemoved?: () => void;
     preserveDirectoryMode?: boolean;
+    targetPathProof?: ReturnType<typeof captureConfigFileWritePathProof>;
   },
 ): typeof fs {
   if (!assertCurrent && !publication) {
     return fsModule;
   }
+  const includePathProofs = new Map(
+    Object.entries(publication?.includeGraph.targets ?? {})
+      .filter(([, target]) => target === configPath)
+      .map(([includePath, target]) => [
+        includePath,
+        publication?.targetPathProof?.path === includePath
+          ? publication.targetPathProof
+          : captureConfigFileWritePathProof(includePath, target, fsModule),
+      ]),
+  );
   let expectedPublication = publication;
   const assertPublication = () => {
     assertCurrent?.();
@@ -38,6 +140,7 @@ export function createGuardedConfigFileSystem(
         configPath,
         fsModule,
         expectedPublication.includeGraph,
+        includePathProofs,
       );
     }
   };
@@ -94,6 +197,7 @@ export function assertBaseSnapshotStillCurrent(
   configPath: string,
   ioFs: typeof fs,
   includeGraph?: { hashes: Record<string, string>; targets: Record<string, string> },
+  includePathProofs?: ReadonlyMap<string, ReturnType<typeof captureConfigFileWritePathProof>>,
 ): void {
   if (snapshot.path !== configPath) {
     throw new ConfigMutationConflictError("config path changed since last load", {
@@ -106,11 +210,9 @@ export function assertBaseSnapshotStillCurrent(
       if (!expectedTarget) {
         throw new ConfigMutationConflictError("included config target changed since last load");
       }
-      const currentTarget =
-        !snapshot.exists && expectedTarget === configPath
-          ? resolvePathViaExistingAncestorSync(includePath)
-          : ioFs.realpathSync(includePath);
-      if (path.normalize(currentTarget) !== expectedTarget) {
+      const pathProof = includePathProofs?.get(includePath);
+      pathProof?.assertCurrent();
+      if (!pathProof && path.normalize(ioFs.realpathSync(includePath)) !== expectedTarget) {
         throw new ConfigMutationConflictError("included config target changed since last load");
       }
       // Aliases of the file being published share its owned-removal expectation below.

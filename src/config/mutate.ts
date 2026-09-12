@@ -59,6 +59,7 @@ import { configWriteCommittedSnapshot } from "./io.types.js";
 import { ConfigWritePostCommitError, type ConfigWriteRollbackStatus } from "./io.write-errors.js";
 import { injectExplicitlySetPaths, projectConfigWriteSource } from "./io.write-prepare.js";
 import {
+  captureConfigFileWritePathProof,
   createGuardedConfigFileSystem,
   rollbackConfigFileWriteIfUnchanged,
 } from "./io.write-safety.js";
@@ -496,7 +497,6 @@ type RootBoundIncludeFile = {
   absolutePath: string;
   relativePath: string;
   root: FsSafeRoot;
-  assertCurrent: () => void;
 };
 
 async function resolveRootBoundIncludeFile(params: {
@@ -522,11 +522,6 @@ async function resolveRootBoundIncludeFile(params: {
     return {
       absolutePath,
       relativePath,
-      assertCurrent: () => {
-        if (resolveConfigIncludeWritePath(params) !== absolutePath) {
-          throw new ConfigMutationConflictError("included config target changed since last load");
-        }
-      },
       root: await createFsRoot(rootReal, {
         hardlinks: "reject",
         mkdir: true,
@@ -623,6 +618,7 @@ async function rollbackJsonFileWriteIfUnchanged(params: {
   target: RootBoundIncludeFile;
   previousRaw: string | null;
   committedRaw: string | null;
+  pathProof: ReturnType<typeof captureConfigFileWritePathProof>;
 }): Promise<boolean> {
   return await rollbackConfigFileWriteIfUnchanged({
     configPath: params.target.absolutePath,
@@ -633,7 +629,7 @@ async function rollbackJsonFileWriteIfUnchanged(params: {
     },
     committedHash: hashConfigRaw(params.committedRaw),
     fsModule: fsNode,
-    assertCurrent: params.target.assertCurrent,
+    assertCurrent: params.pathProof.assertCurrent,
     preserveDirectoryMode: true,
     durable: true,
     destinationHardlinks: "reject",
@@ -652,7 +648,7 @@ async function writeRootBoundJsonFile(params: {
   assertConfigPathForWrite: () => void;
   preCommitRuntimePreflight?: () => Promise<unknown>;
   skipOutputLogs?: boolean;
-}): Promise<void> {
+}): Promise<ReturnType<typeof captureConfigFileWritePathProof>> {
   params.assertConfigPathForWrite();
   await params.preCommitRuntimePreflight?.();
   const targetAtCommit = await resolveExpectedRootBoundIncludeFile({
@@ -668,9 +664,14 @@ async function writeRootBoundJsonFile(params: {
   if (currentHash !== hashConfigIncludeRaw(params.expectedRaw)) {
     throw new ConfigMutationConflictError("included config changed while preparing write");
   }
+  const pathProof = captureConfigFileWritePathProof(
+    params.includePath,
+    targetAtCommit.absolutePath,
+    fsNode,
+  );
   const assertCurrent = () => {
     params.assertConfigPathForWrite();
-    targetAtCommit.assertCurrent();
+    pathProof.assertCurrent();
   };
   const content = formatJsonFileValue(params.value);
   // The include fast path bypasses writeConfigFile(); preserve config-path
@@ -690,6 +691,7 @@ async function writeRootBoundJsonFile(params: {
     {
       snapshot: { path: targetAtCommit.absolutePath, exists: currentRaw !== null, raw: currentRaw },
       includeGraph: params.includeGraph,
+      targetPathProof: pathProof,
       preserveDirectoryMode: true,
       onRootRemoved: () => {
         publication.phase = "removed";
@@ -720,6 +722,7 @@ async function writeRootBoundJsonFile(params: {
         target: targetAtCommit,
         previousRaw: currentRaw,
         committedRaw: publication.phase === "published" ? content : null,
+        pathProof,
       });
       rollbackStatus = rolledBack ? "restored" : "not-restored";
     } catch (rollbackError) {
@@ -741,6 +744,7 @@ async function writeRootBoundJsonFile(params: {
       cause: error,
     });
   }
+  return pathProof;
 }
 
 async function tryWriteIncludeOwnedConfigMutation(params: {
@@ -922,7 +926,7 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
           includePath,
           includeHash,
         });
-      await writeRootBoundJsonFile({
+      const pathProof = await writeRootBoundJsonFile({
         configPath: params.snapshot.path,
         includePath,
         allowedRoots,
@@ -1058,6 +1062,7 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
             target: includeTarget,
             previousRaw: previousIncludeRaw,
             committedRaw: committedIncludeRaw,
+            pathProof,
           });
           rollbackStatus = rolledBack ? "restored" : "not-restored";
           if (rolledBack) {
