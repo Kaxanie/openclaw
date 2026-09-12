@@ -102,7 +102,7 @@ describe("profile-owned skill publication and selection", () => {
       const entries = loadSkillLibrarySelection(pins, options);
       const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
       const { buildWorkspaceSkillCommandSpecs } = await import("../discovery/command-specs.js");
-      const snapshot = buildSkillSnapshot(stateDir, { entries });
+      const snapshot = await buildSkillSnapshot(stateDir, { entries });
       const commands = buildWorkspaceSkillCommandSpecs(stateDir, { entries });
       expect(pins[0]!.name).toMatch(/^s_long_skil_[a-f0-9]{20}$/);
       expect(commands[0]).toMatchObject({
@@ -115,7 +115,7 @@ describe("profile-owned skill publication and selection", () => {
         ...entries[0]!,
         skill: { ...entries[0]!.skill, source: "openclaw-workspace" },
       };
-      expect(() => buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).toThrow(
+      await expect(buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).rejects.toThrow(
         "ambiguous",
       );
       expect(() =>
@@ -427,7 +427,10 @@ describe("profile-owned skill publication and selection", () => {
       const pins = seedSkillLibrarySelection(alice, options);
       const entries = loadSkillLibrarySelection(pins, options);
       const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-      const snapshot = { ...buildSkillSnapshot(stateDir, { entries }), librarySelections: pins };
+      const snapshot = {
+        ...(await buildSkillSnapshot(stateDir, { entries })),
+        librarySelections: pins,
+      };
       expect(snapshot.resolvedSkills).toEqual([]);
       await saveSkillLibrary(
         alice,
@@ -480,7 +483,7 @@ describe("library admission and imports", () => {
       config: ["channels.fixture.enabled"],
     });
     const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-    const snapshot = buildSkillSnapshot(stateDir, {
+    const snapshot = await buildSkillSnapshot(stateDir, {
       entries: selected,
       config: {
         skills: {
